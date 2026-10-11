@@ -13,4 +13,7 @@ var (
 	ErrPoolAlreadyClosed = errors.New("conn pool already closed")
 	// ErrDialFailed wraps the error of a failed attempt to open a connection.
 	ErrDialFailed = errors.New("conn pool dial failed")
+	// ErrMaxRetriesExceeded is joined into ErrDialFailed when every dial
+	// attempt failed.
+	ErrMaxRetriesExceeded = errors.New("maximum retries exceeded")
 )

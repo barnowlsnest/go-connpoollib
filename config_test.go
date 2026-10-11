@@ -43,10 +43,11 @@ func (s *ConfigSuite) TestUnixSocketNeedsNoPort() {
 	s.Equal("/tmp/pool.sock", cfg.Addr())
 }
 
-func (s *ConfigSuite) TestNoFinalDelay() {
-	cfg, err := NewConfig(WithPort(1), WithDialMaxAttempts(3), WithDialBackoff(time.Second, time.Minute), WithDialBackoffJitter(false))
+func (s *ConfigSuite) TestDialDelay() {
+	cfg, err := NewConfig(WithPort(1), WithDialMaxAttempts(4), WithDialBackoff(time.Second, 3*time.Second), WithDialBackoffJitter(false))
 	s.Require().NoError(err)
-	s.Positive(cfg.dialBackoff.Delay(0))
-	s.Positive(cfg.dialBackoff.Delay(1))
-	s.Zero(cfg.dialBackoff.Delay(2))
+	s.Equal(time.Second, cfg.dialDelay(0))
+	s.Equal(2*time.Second, cfg.dialDelay(1))
+	s.Equal(3*time.Second, cfg.dialDelay(2)) // capped
+	s.Zero(cfg.dialDelay(3))                 // no delay after the last attempt
 }

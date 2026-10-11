@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/task"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -198,7 +197,7 @@ func (s *PoolSuite) TestAcquireGivesUpAfterMaxAttempts() {
 	conn, err := pool.Acquire(context.Background())
 	s.Nil(conn)
 	s.ErrorIs(err, ErrDialFailed)
-	s.ErrorIs(err, task.ErrMaxRetriesExceeded)
+	s.ErrorIs(err, ErrMaxRetriesExceeded)
 	s.ErrorIs(err, syscall.ECONNREFUSED)
 	s.Equal(int32(4), s.attempts.Load())
 	s.Empty(pool.slots)
