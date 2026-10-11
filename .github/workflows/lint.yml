@@ -18,6 +18,5 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.2
-          # Prebuilt binaries lag the Go release; build with the toolchain from go.mod.
-          install-mode: goinstall
+          # v2.14.0 bundles x/tools v0.50.0, which reads Go 1.27.2 export data (pkgbits V5).
+          version: v2.14.0
