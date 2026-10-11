@@ -140,7 +140,7 @@ func (s *ConnSuite) TestCloseDiscardsLifespanExpired() {
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	time.Sleep(40 * time.Millisecond)
+	s.eventually(func() bool { return conn.expired(time.Now()) })
 	s.Require().NoError(conn.Close())
 
 	s.Empty(pool.idleChan)
