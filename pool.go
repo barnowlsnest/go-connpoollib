@@ -20,6 +20,7 @@ type ConnPool struct {
 	slots      chan struct{}
 	dialTokens chan struct{}
 	cfg        *Config
+	stats      poolStats
 	mux        sync.Mutex
 	wg         sync.WaitGroup
 	closed     atomic.Bool
@@ -74,6 +75,7 @@ func (pool *ConnPool) Acquire(ctx context.Context) (*Conn, error) {
 		return conn, err
 	}
 
+	defer pool.stats.recordWait(time.Now())
 	ctx, cancel := context.WithTimeout(ctx, pool.cfg.AcquireTimeout())
 	defer cancel()
 
@@ -156,7 +158,7 @@ func (pool *ConnPool) takeIdle(conn *Conn, ok bool) (*Conn, error) {
 		_ = pool.closeConn(conn)
 		return nil, ErrPoolAlreadyClosed
 	}
-	if conn.expired(time.Now()) || !conn.reusable() {
+	if pool.unfit(conn, time.Now()) {
 		_ = pool.closeConn(conn)
 		return nil, errConnDiscarded
 	}
@@ -167,9 +169,16 @@ func (pool *ConnPool) takeIdle(conn *Conn, ok bool) (*Conn, error) {
 
 // closeConn closes the underlying connection and frees its pool slot.
 func (pool *ConnPool) closeConn(conn *Conn) error {
-	err := conn.Conn.Close()
-	<-pool.slots
+	err := pool.dropConn(conn)
 	pool.requestRefill()
+	return err
+}
+
+// dropConn is closeConn without requesting a refill.
+func (pool *ConnPool) dropConn(conn *Conn) error {
+	err := conn.Conn.Close()
+	pool.stats.open.Add(-1)
+	<-pool.slots
 	return err
 }
 
@@ -217,6 +226,8 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 				_ = conn.Close()
 				return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), ErrPoolAlreadyClosed)
 			}
+			pool.stats.dials.Add(1)
+			pool.stats.open.Add(1)
 			return newConn(conn, pool), nil
 		}
 		lastErr = err
@@ -237,6 +248,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 		}
 	}
 
+	pool.stats.dialErrors.Add(1)
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), errors.Join(context.Cause(ctx), lastErr))
 	}
@@ -308,8 +320,7 @@ func (pool *ConnPool) fillIdle() {
 			return
 		}
 		if !pool.putIdle(conn) {
-			_ = conn.Conn.Close()
-			<-pool.slots
+			_ = pool.dropConn(conn)
 			return
 		}
 	}
@@ -354,7 +365,7 @@ func (pool *ConnPool) evictIdle() {
 		default:
 			return
 		}
-		if conn.expired(time.Now()) || !conn.reusable() || !pool.putIdle(conn) {
+		if pool.unfit(conn, time.Now()) || !pool.putIdle(conn) {
 			_ = pool.closeConn(conn)
 		}
 	}

@@ -41,9 +41,14 @@ func newConn(conn net.Conn, pool *ConnPool) *Conn {
 // expired reports whether the connection outlived its lifespan, or has been
 // idle for longer than the configured idle timeout.
 func (c *Conn) expired(now time.Time) bool {
-	if now.Sub(c.createdAt) >= c.lifespan {
-		return true
-	}
+	return c.lifespanEnded(now) || c.idleTooLong(now)
+}
+
+func (c *Conn) lifespanEnded(now time.Time) bool {
+	return now.Sub(c.createdAt) >= c.lifespan
+}
+
+func (c *Conn) idleTooLong(now time.Time) bool {
 	return !c.idleSince.IsZero() && now.Sub(c.idleSince) >= c.pool.cfg.IdleTimeout()
 }
 
@@ -55,7 +60,7 @@ func (c *Conn) Close() error {
 		return net.ErrClosed
 	}
 	// Skip the reusable probe when release would reject the conn anyway.
-	if c.pool.closed.Load() || c.expired(time.Now()) || !c.reusable() {
+	if c.pool.closed.Load() || c.pool.unfit(c, time.Now()) {
 		return c.pool.closeConn(c)
 	}
 
