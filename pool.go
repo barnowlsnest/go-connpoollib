@@ -176,7 +176,7 @@ func (pool *ConnPool) closeConn(conn *Conn) error {
 
 // dropConn is closeConn without requesting a refill.
 func (pool *ConnPool) dropConn(conn *Conn) error {
-	err := conn.Conn.Close()
+	err := conn.netConn.Close()
 	pool.stats.open.Add(-1)
 	<-pool.slots
 	return err
@@ -259,7 +259,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 // instead if the pool is closed or already holds MaxPoolSize idle connections.
 func (pool *ConnPool) release(conn *Conn) error {
 	idle := &Conn{
-		Conn:      conn.Conn,
+		netConn:   conn.netConn,
 		pool:      pool,
 		createdAt: conn.createdAt,
 		lifespan:  conn.lifespan,

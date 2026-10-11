@@ -14,16 +14,19 @@ const (
 	lifespanJitterDiv = 10
 )
 
-// Conn is a pooled connection. It wraps a net.Conn and returns it to the pool
-// on Close instead of closing it. A Conn must not be used after Close.
+// Conn is a pooled connection. It implements net.Conn and returns the
+// underlying connection to the pool on Close instead of closing it. A Conn must
+// not be used after Close or Discard.
 type Conn struct {
 	createdAt time.Time
 	idleSince time.Time
-	net.Conn
-	pool     *ConnPool
-	lifespan time.Duration
-	released atomic.Bool
+	netConn   net.Conn
+	pool      *ConnPool
+	lifespan  time.Duration
+	released  atomic.Bool
 }
+
+var _ net.Conn = (*Conn)(nil)
 
 func newConn(conn net.Conn, pool *ConnPool) *Conn {
 	lifespan := pool.cfg.LifespanTimeout()
@@ -31,7 +34,7 @@ func newConn(conn net.Conn, pool *ConnPool) *Conn {
 		lifespan -= randDuration(jitter)
 	}
 	return &Conn{
-		Conn:      conn,
+		netConn:   conn,
 		pool:      pool,
 		createdAt: time.Now(),
 		lifespan:  lifespan,
@@ -67,12 +70,30 @@ func (c *Conn) Close() error {
 	return c.pool.release(c)
 }
 
+// Discard closes the connection and frees its pool slot instead of returning
+// it to the pool. Use it when the connection is in an unknown state, e.g. after
+// a write timeout or a protocol error, which the health probe cannot detect.
+// Calling Discard or Close afterwards returns net.ErrClosed.
+func (c *Conn) Discard() error {
+	if c.released.Swap(true) {
+		return net.ErrClosed
+	}
+	c.pool.stats.discarded.Add(1)
+	return c.pool.closeConn(c)
+}
+
+// NetConn returns the underlying connection, e.g. a *tls.Conn. It bypasses the
+// pool: do not close it, and do not use it after Close or Discard.
+func (c *Conn) NetConn() net.Conn {
+	return c.netConn
+}
+
 // Read returns net.ErrClosed after Close: the connection may be lent out again.
 func (c *Conn) Read(b []byte) (int, error) {
 	if c.released.Load() {
 		return 0, net.ErrClosed
 	}
-	return c.Conn.Read(b)
+	return c.netConn.Read(b)
 }
 
 // Write returns net.ErrClosed after Close: the connection may be lent out again.
@@ -80,7 +101,17 @@ func (c *Conn) Write(b []byte) (int, error) {
 	if c.released.Load() {
 		return 0, net.ErrClosed
 	}
-	return c.Conn.Write(b)
+	return c.netConn.Write(b)
+}
+
+// LocalAddr returns the local network address.
+func (c *Conn) LocalAddr() net.Addr {
+	return c.netConn.LocalAddr()
+}
+
+// RemoteAddr returns the remote network address.
+func (c *Conn) RemoteAddr() net.Addr {
+	return c.netConn.RemoteAddr()
 }
 
 // SetDeadline returns net.ErrClosed after Close.
@@ -88,7 +119,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
 	}
-	return c.Conn.SetDeadline(t)
+	return c.netConn.SetDeadline(t)
 }
 
 // SetReadDeadline returns net.ErrClosed after Close.
@@ -96,7 +127,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
 	}
-	return c.Conn.SetReadDeadline(t)
+	return c.netConn.SetReadDeadline(t)
 }
 
 // SetWriteDeadline returns net.ErrClosed after Close.
@@ -104,7 +135,7 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
 	}
-	return c.Conn.SetWriteDeadline(t)
+	return c.netConn.SetWriteDeadline(t)
 }
 
 // sockState is the result of a non-blocking peek at a socket.
@@ -121,11 +152,11 @@ const (
 // waiting to be read and the peer has not closed it. Deadlines are cleared.
 func (c *Conn) reusable() bool {
 	// Clear deadlines first: an expired one would fail the probe.
-	if err := c.Conn.SetDeadline(time.Time{}); err != nil {
+	if err := c.netConn.SetDeadline(time.Time{}); err != nil {
 		return false
 	}
 
-	sock, wrapped := c.Conn, false
+	sock, wrapped := c.netConn, false
 	if w, ok := sock.(interface{ NetConn() net.Conn }); ok { // e.g. *tls.Conn
 		sock, wrapped = w.NetConn(), true
 	}
@@ -144,14 +175,14 @@ func (c *Conn) reusable() bool {
 	}
 
 	// Fallback: a short blocking read that must time out.
-	if err := c.Conn.SetReadDeadline(time.Now().Add(connCheckTimeout)); err != nil {
+	if err := c.netConn.SetReadDeadline(time.Now().Add(connCheckTimeout)); err != nil {
 		return false
 	}
-	_, err := c.Conn.Read(make([]byte, 1))
+	_, err := c.netConn.Read(make([]byte, 1))
 	var nerr net.Error
 	if !errors.As(err, &nerr) || !nerr.Timeout() {
 		return false
 	}
 
-	return c.Conn.SetDeadline(time.Time{}) == nil
+	return c.netConn.SetDeadline(time.Time{}) == nil
 }

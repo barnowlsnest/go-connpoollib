@@ -117,7 +117,7 @@ func (s *baseSuite) accept() <-chan net.Conn {
 
 func (s *baseSuite) closeConn(conn *Conn) {
 	s.Require().NotNil(conn)
-	s.NoError(conn.Conn.Close())
+	s.NoError(conn.netConn.Close())
 }
 
 func (s *baseSuite) eventually(cond func() bool) {
@@ -430,7 +430,7 @@ func (s *PoolSuite) TestPoolCloseWithCheckedOutConns() {
 	s.NoError(a.Close())
 	s.NoError(b.Close())
 	s.Empty(pool.slots)
-	_, err = a.Conn.Read(make([]byte, 1))
+	_, err = a.netConn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
 }
 
@@ -521,7 +521,7 @@ func (s *PoolSuite) TestAcquireOverTLS() {
 	for range 3 {
 		conn, err := pool.Acquire(context.Background())
 		s.Require().NoError(err)
-		s.IsType(&tls.Conn{}, conn.Conn)
+		s.IsType(&tls.Conn{}, conn.NetConn())
 		_, err = conn.Write([]byte("ping"))
 		s.Require().NoError(err)
 		buf := make([]byte, 4)
