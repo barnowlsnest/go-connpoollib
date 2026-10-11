@@ -1,6 +1,7 @@
 package connpool
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -49,13 +50,16 @@ func isUnixNetwork(network string) bool {
 }
 
 type (
+	// DialFunc opens a connection to addr on network, like net.Dialer.DialContext.
+	DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	// Option configures a Config.
 	Option func(*Config)
 
 	// Config holds pool settings. Create it with NewConfig.
 	Config struct {
 		dialBackoff       retry.Strategy
-		dialer            *net.Dialer
+		dialFunc          DialFunc
 		network           string
 		host              string
 		dialMaxAttempts   int
@@ -140,7 +144,19 @@ func WithLifespanTimeout(lifespanTimeout time.Duration) Option {
 // with a 5s timeout and 30s keep-alive.
 func WithDialer(dialer *net.Dialer) Option {
 	return func(c *Config) {
-		c.dialer = dialer
+		c.dialFunc = nil
+		if dialer != nil {
+			c.dialFunc = dialer.DialContext
+		}
+	}
+}
+
+// WithDialFunc sets the function used to open connections, e.g. the
+// DialContext method of a *tls.Dialer or a proxy dialer. It overrides
+// WithDialer.
+func WithDialFunc(dial DialFunc) Option {
+	return func(c *Config) {
+		c.dialFunc = dial
 	}
 }
 
@@ -189,10 +205,10 @@ func NewConfig(opts ...Option) (*Config, error) {
 		idleTimeout:     defaultIdleTimeout,
 		lifespanTimeout: defaultLifespanTimeout,
 		acquireTimeout:  defaultAcquireTimeout,
-		dialer: &net.Dialer{
+		dialFunc: (&net.Dialer{
 			Timeout:   defaultConnectionTimeout,
 			KeepAlive: defaultKeepAliveTimeout,
-		},
+		}).DialContext,
 		dialMaxAttempts:   defaultDialMaxAttempts,
 		dialBackoffBase:   defaultDialBackoffBase,
 		dialBackoffMax:    defaultDialBackoffMax,
@@ -313,8 +329,8 @@ func (cfg *Config) validate() error {
 		return fmt.Errorf("idleTimeout must be greater than 0: %w", ErrInvalidConnPoolCfg)
 	case cfg.lifespanTimeout <= 0:
 		return fmt.Errorf("lifespanTimeout must be greater than 0: %w", ErrInvalidConnPoolCfg)
-	case cfg.dialer == nil:
-		return fmt.Errorf("dialer is required: %w", ErrInvalidConnPoolCfg)
+	case cfg.dialFunc == nil:
+		return fmt.Errorf("dial func is required: %w", ErrInvalidConnPoolCfg)
 	case cfg.acquireTimeout <= 0:
 		return fmt.Errorf("acquireTimeout must be greater than 0: %w", ErrInvalidConnPoolCfg)
 	case cfg.dialMaxAttempts <= 0:

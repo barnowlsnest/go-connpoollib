@@ -26,6 +26,8 @@ func (s *ConfigSuite) TestValidation() {
 		"empty network":     {WithPort(1), WithNetwork("")},
 		"port too large":    {WithPort(70000)},
 		"minIdle above max": {WithPort(1), WithMinIdle(5), WithMaxPoolSize(2)},
+		"nil dialer":        {WithPort(1), WithDialer(nil)},
+		"nil dial func":     {WithPort(1), WithDialFunc(nil)},
 	}
 	for name, opts := range tests {
 		s.Run(name, func() {
@@ -39,14 +41,6 @@ func (s *ConfigSuite) TestUnixSocketNeedsNoPort() {
 	cfg, err := NewConfig(WithNetwork("unix"), WithHost("/tmp/pool.sock"))
 	s.Require().NoError(err)
 	s.Equal("/tmp/pool.sock", cfg.Addr())
-}
-
-func (s *ConfigSuite) TestDialerNotShared() {
-	a, err := NewConfig(WithPort(1))
-	s.Require().NoError(err)
-	b, err := NewConfig(WithPort(1))
-	s.Require().NoError(err)
-	s.NotSame(a.dialer, b.dialer)
 }
 
 func (s *ConfigSuite) TestNoFinalDelay() {
