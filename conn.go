@@ -2,7 +2,6 @@ package connpool
 
 import (
 	"errors"
-	"math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
@@ -29,7 +28,7 @@ type Conn struct {
 func newConn(conn net.Conn, pool *ConnPool) *Conn {
 	lifespan := pool.cfg.LifespanTimeout()
 	if jitter := lifespan / lifespanJitterDiv; jitter > 0 {
-		lifespan -= rand.N(jitter) //nolint:gosec // jitter, not security
+		lifespan -= randDuration(jitter)
 	}
 	return &Conn{
 		Conn:      conn,

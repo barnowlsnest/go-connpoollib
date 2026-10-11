@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/task"
 )
 
 // ConnPool is a pool of reusable connections. It maintains a set of idle connections and dials new ones on demand,
@@ -226,7 +224,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 			break
 		}
 
-		if d := pool.cfg.dialBackoff.Delay(attempt); d > 0 {
+		if d := pool.cfg.dialDelay(attempt); d > 0 {
 			timer := time.NewTimer(d)
 			select {
 			case <-timer.C:
@@ -242,7 +240,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), errors.Join(context.Cause(ctx), lastErr))
 	}
-	return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), errors.Join(task.ErrMaxRetriesExceeded, lastErr))
+	return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), errors.Join(ErrMaxRetriesExceeded, lastErr))
 }
 
 // release returns the connection to the idle set. The connection is closed

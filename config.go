@@ -2,12 +2,12 @@ package connpool
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"net"
 	"strconv"
 	"time"
-
-	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/retry"
 )
 
 const (
@@ -27,20 +27,6 @@ const (
 	defaultDialBackoffJitter = true
 )
 
-// noFinalDelay stops the retry loop from sleeping after the last failed
-// attempt, when no further attempt follows.
-type noFinalDelay struct {
-	retry.Strategy
-	attempts int
-}
-
-func (s noFinalDelay) Delay(attempt int) time.Duration {
-	if attempt >= s.attempts-1 {
-		return 0
-	}
-	return s.Strategy.Delay(attempt)
-}
-
 func isUnixNetwork(network string) bool {
 	switch network {
 	case "unix", "unixgram", "unixpacket":
@@ -58,7 +44,6 @@ type (
 
 	// Config holds pool settings. Create it with NewConfig.
 	Config struct {
-		dialBackoff       retry.Strategy
 		dialFunc          DialFunc
 		network           string
 		host              string
@@ -222,16 +207,30 @@ func NewConfig(opts ...Option) (*Config, error) {
 		return nil, err
 	}
 
-	cfg.dialBackoff = noFinalDelay{
-		Strategy: retry.NewExponentialBackoff(
-			retry.WithBaseDelay(cfg.dialBackoffBase),
-			retry.WithMaxDelay(cfg.dialBackoffMax),
-			retry.WithJitter(cfg.dialBackoffJitter),
-		),
-		attempts: cfg.dialMaxAttempts,
-	}
-
 	return cfg, nil
+}
+
+// dialDelay returns the wait after the failed 0-based attempt: base * 2^attempt
+// capped at dialBackoffMax, fully jittered if enabled. It is zero after the
+// last attempt, when no further attempt follows.
+func (cfg *Config) dialDelay(attempt int) time.Duration {
+	if attempt >= cfg.dialMaxAttempts-1 {
+		return 0
+	}
+	d := cfg.dialBackoffMax
+	if cfg.dialBackoffBase <= cfg.dialBackoffMax>>attempt {
+		d = cfg.dialBackoffBase << attempt
+	}
+	if cfg.dialBackoffJitter {
+		d = randDuration(d + 1)
+	}
+	return d
+}
+
+// randDuration returns a uniformly random duration in [0, n). n must be > 0.
+func randDuration(n time.Duration) time.Duration {
+	v, _ := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	return time.Duration(v.Int64())
 }
 
 // Network returns the network passed to the dialer.
