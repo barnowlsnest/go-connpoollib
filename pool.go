@@ -2,10 +2,12 @@ package connpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
-	
+	"time"
+
 	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/semaphore"
 	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/task"
 	"golang.org/x/sync/errgroup"
@@ -14,17 +16,15 @@ import (
 const taskConnName = "connpool.conn"
 
 type (
-	ConnFactory func(ctx context.Context) (*Conn, error)
-	
 	ConnPool struct {
-		mux        sync.Mutex
-		onceClose  sync.Once
 		idleChan   chan *Conn
 		closedChan chan struct{}
-		active     []*Conn
+		slots      chan struct{}
 		sem        *semaphore.Semaphore
 		cfg        *Config
 		dialSeq    atomic.Uint64
+		mux        sync.Mutex
+		closed     atomic.Bool
 	}
 )
 
@@ -32,11 +32,11 @@ func New(cfg *Config) (*ConnPool, error) {
 	if cfg == nil {
 		return nil, ErrNilConfig
 	}
-	
+
 	return &ConnPool{
 		closedChan: make(chan struct{}),
 		idleChan:   make(chan *Conn, cfg.MaxPoolSize()),
-		active:     make([]*Conn, 0, cfg.MaxPoolSize()),
+		slots:      make(chan struct{}, cfg.MaxPoolSize()),
 		sem:        semaphore.NewSemaphore(cfg.MaxConcurrency()),
 		cfg:        cfg,
 	}, nil
@@ -49,33 +49,87 @@ func (pool *ConnPool) Config() *Config {
 func (pool *ConnPool) Acquire(ctx context.Context) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, pool.cfg.AcquireTimeout())
 	defer cancel()
-	
+
 	if err := pool.sem.AcquireWithContext(ctx); err != nil {
 		return nil, err
 	}
 	defer pool.sem.Release()
-	
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case conn, ok := <-pool.idleChan:
-		if !ok {
-			return nil, ErrPoolAlreadyClosed
+
+	for {
+		// Prefer an idle connection over dialing a new one.
+		select {
+		case idle, ok := <-pool.idleChan:
+			if conn, err := pool.takeIdle(idle, ok); conn != nil || err != nil {
+				return conn, err
+			}
+			continue
+		default:
 		}
-		pool.toActive(conn)
-		return conn, nil
-	default:
-		return pool.openConnection(ctx)
+
+		// Otherwise wait for an idle connection or a free slot to dial into.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pool.closedChan:
+			return nil, ErrPoolAlreadyClosed
+		case idle, ok := <-pool.idleChan:
+			if conn, err := pool.takeIdle(idle, ok); conn != nil || err != nil {
+				return conn, err
+			}
+		case pool.slots <- struct{}{}:
+			conn, err := pool.openConnection(ctx)
+			if err != nil {
+				<-pool.slots
+				return nil, err
+			}
+			return conn, nil
+		}
 	}
 }
 
+// takeIdle handles a receive from idleChan. It returns the connection if it is
+// still fit for reuse, ErrPoolAlreadyClosed if the channel was closed, or
+// (nil, nil) after discarding a connection that expired or was dropped by the
+// peer, in which case the caller should look again.
+func (pool *ConnPool) takeIdle(conn *Conn, ok bool) (*Conn, error) {
+	if !ok {
+		return nil, ErrPoolAlreadyClosed
+	}
+	if conn.expired(time.Now()) || !conn.reusable() {
+		_ = pool.closeConn(conn)
+		return nil, nil
+	}
+	return conn, nil
+}
+
+// closeConn closes the underlying connection and frees its pool slot.
+func (pool *ConnPool) closeConn(conn *Conn) error {
+	err := conn.Conn.Close()
+	<-pool.slots
+	return err
+}
+
+// Close shuts the pool down and closes all idle connections. Connections that
+// are still checked out are closed when their holders call Conn.Close.
 func (pool *ConnPool) Close() error {
-	pool.onceClose.Do(func() {
-		close(pool.idleChan)
-		close(pool.closedChan)
-	})
-	
-	return nil
+	if !pool.closed.CompareAndSwap(false, true) {
+		return ErrPoolAlreadyClosed
+	}
+
+	// Taking the mutex waits out any in-flight release before the channel closes.
+	pool.mux.Lock()
+	close(pool.closedChan)
+	close(pool.idleChan)
+	pool.mux.Unlock()
+
+	var errs []error
+	for conn := range pool.idleChan {
+		if err := pool.closeConn(conn); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 func (pool *ConnPool) connectionAttempt(ptr *atomic.Pointer[Conn]) func(*task.Run) error {
@@ -84,9 +138,16 @@ func (pool *ConnPool) connectionAttempt(ptr *atomic.Pointer[Conn]) func(*task.Ru
 		if err != nil {
 			return err
 		}
-		
+
+		// The task may have timed out or been canceled while dialing; nobody
+		// would pick this connection up.
+		if err := run.Context().Err(); err != nil {
+			_ = conn.Close()
+			return err
+		}
+
 		ptr.Store(newConn(conn, pool))
-		
+
 		return nil
 	}
 }
@@ -97,6 +158,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 		task.WithID(pool.dialSeq.Add(1)),
 		task.WithName(taskConnName),
 		task.WithMaxRetries(pool.cfg.DialMaxAttempts()),
+		task.WithMaxDuration(pool.cfg.AcquireTimeout()),
 		task.WithRetryStrategy(pool.cfg.dialBackoff),
 		task.WithTaskFn(pool.connectionAttempt(&dialed)),
 	)
@@ -104,7 +166,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrDialFailed, err)
 	}
-	
+
 	t := task.New(*def)
 	g, ctx := errgroup.WithContext(ctx)
 	done := make(chan struct{})
@@ -124,45 +186,33 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 		return t.GoRetry(ctx)
 	})
 	if err := g.Wait(); err != nil {
+		// The dial may have succeeded just before the watcher gave up.
+		if conn := dialed.Swap(nil); conn != nil {
+			_ = conn.Conn.Close()
+		}
 		return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), err)
 	}
 	if conn := dialed.Load(); conn != nil {
-		pool.toActive(conn)
 		return conn, nil
 	}
-	
+
 	return nil, fmt.Errorf("%w %s: %w", ErrDialFailed, pool.cfg.Addr(), ctx.Err())
 }
 
-func (pool *ConnPool) totalConnections() uint64 {
+// release returns the connection to the idle set. The connection is closed
+// instead if the pool is closed or already holds MaxPoolSize idle connections.
+func (pool *ConnPool) release(conn *Conn) error {
 	pool.mux.Lock()
-	defer pool.mux.Unlock()
-	active := uint64(len(pool.active))
-	idle := uint64(len(pool.idleChan))
-	return active + idle
-}
-
-func (pool *ConnPool) isExhausted() bool {
-	return pool.totalConnections() >= uint64(pool.cfg.MaxPoolSize())
-}
-
-func (pool *ConnPool) toActive(conn *Conn) {
-	pool.mux.Lock()
-	defer pool.mux.Unlock()
-	pool.active = append(pool.active, conn)
-}
-
-func (pool *ConnPool) release(conn *Conn) {
-	if conn == nil {
-		return
-	}
-	pool.idleChan <- conn
-	pool.mux.Lock()
-	defer pool.mux.Unlock()
-	for i, c := range pool.active {
-		if c == conn {
-			pool.active = append(pool.active[:i], pool.active[i+1:]...)
-			break
+	if !pool.closed.Load() {
+		idle := &Conn{Conn: conn.Conn, pool: pool, createdAt: conn.createdAt, idleSince: time.Now()}
+		select {
+		case pool.idleChan <- idle:
+			pool.mux.Unlock()
+			return nil
+		default:
 		}
 	}
+	pool.mux.Unlock()
+
+	return pool.closeConn(conn)
 }

@@ -5,7 +5,7 @@ import (
 	"net"
 	"strconv"
 	"time"
-	
+
 	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/retry"
 )
 
@@ -26,29 +26,46 @@ const (
 	defaultDialBackoffJitter = true
 )
 
-var defaultDialer = &net.Dialer{
-	Timeout:   defaultConnectionTimeout,
-	KeepAlive: defaultKeepAliveTimeout,
+// noFinalDelay stops the retry loop from sleeping after the last failed
+// attempt, when no further attempt follows.
+type noFinalDelay struct {
+	retry.Strategy
+	attempts int
+}
+
+func (s noFinalDelay) Delay(attempt int) time.Duration {
+	if attempt >= s.attempts-1 {
+		return 0
+	}
+	return s.Strategy.Delay(attempt)
+}
+
+func isUnixNetwork(network string) bool {
+	switch network {
+	case "unix", "unixgram", "unixpacket":
+		return true
+	}
+	return false
 }
 
 type (
 	Option func(*Config)
-	
+
 	Config struct {
+		dialBackoff       retry.Strategy
+		dialer            *net.Dialer
 		network           string
 		host              string
-		port              int
-		minIdle           int
-		maxPoolSize       int
-		maxConcurrency    int
 		dialMaxAttempts   int
+		maxConcurrency    int
+		maxPoolSize       int
 		idleTimeout       time.Duration
 		lifespanTimeout   time.Duration
 		acquireTimeout    time.Duration
 		dialBackoffBase   time.Duration
 		dialBackoffMax    time.Duration
-		dialer            *net.Dialer
-		dialBackoff       retry.Strategy
+		minIdle           int
+		port              int
 		dialBackoffJitter bool
 	}
 )
@@ -148,8 +165,10 @@ func NewConfig(opts ...Option) (*Config, error) {
 		idleTimeout:     defaultIdleTimeout,
 		lifespanTimeout: defaultLifespanTimeout,
 		acquireTimeout:  defaultAcquireTimeout,
-		dialer:          defaultDialer,
-		
+		dialer: &net.Dialer{
+			Timeout:   defaultConnectionTimeout,
+			KeepAlive: defaultKeepAliveTimeout,
+		},
 		dialMaxAttempts:   defaultDialMaxAttempts,
 		dialBackoffBase:   defaultDialBackoffBase,
 		dialBackoffMax:    defaultDialBackoffMax,
@@ -158,17 +177,20 @@ func NewConfig(opts ...Option) (*Config, error) {
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	
-	cfg.dialBackoff = retry.NewExponentialBackoff(
-		retry.WithBaseDelay(cfg.dialBackoffBase),
-		retry.WithMaxDelay(cfg.dialBackoffMax),
-		retry.WithJitter(cfg.dialBackoffJitter),
-	)
-	
+
+	cfg.dialBackoff = noFinalDelay{
+		Strategy: retry.NewExponentialBackoff(
+			retry.WithBaseDelay(cfg.dialBackoffBase),
+			retry.WithMaxDelay(cfg.dialBackoffMax),
+			retry.WithJitter(cfg.dialBackoffJitter),
+		),
+		attempts: cfg.dialMaxAttempts,
+	}
+
 	return cfg, nil
 }
 
@@ -225,19 +247,27 @@ func (cfg *Config) DialBackoffJitter() bool {
 }
 
 func (cfg *Config) Addr() string {
-	return cfg.host + ":" + strconv.Itoa(cfg.port)
+	if isUnixNetwork(cfg.network) {
+		return cfg.host
+	}
+	return net.JoinHostPort(cfg.host, strconv.Itoa(cfg.port))
 }
 
+//nolint:gocyclo
 func (cfg *Config) validate() error {
 	switch {
+	case cfg.network == "":
+		return fmt.Errorf("network is required: %w", ErrInvalidConnPoolCfg)
 	case cfg.host == "":
 		return fmt.Errorf("host is required: %w", ErrInvalidConnPoolCfg)
-	case cfg.port <= 0:
-		return fmt.Errorf("port must be greater than 0: %w", ErrInvalidConnPoolCfg)
+	case !isUnixNetwork(cfg.network) && (cfg.port <= 0 || cfg.port > 65535):
+		return fmt.Errorf("port must be between 1 and 65535: %w", ErrInvalidConnPoolCfg)
 	case cfg.minIdle < 0:
 		return fmt.Errorf("minIdle must be greater than or equal to 0: %w", ErrInvalidConnPoolCfg)
 	case cfg.maxPoolSize <= 0:
 		return fmt.Errorf("maxPoolSize must be greater than 0: %w", ErrInvalidConnPoolCfg)
+	case cfg.minIdle > cfg.maxPoolSize:
+		return fmt.Errorf("minIdle must be less than or equal to maxPoolSize: %w", ErrInvalidConnPoolCfg)
 	case cfg.maxConcurrency <= 0:
 		return fmt.Errorf("maxConcurrency must be greater than 0: %w", ErrInvalidConnPoolCfg)
 	case cfg.idleTimeout <= 0:
