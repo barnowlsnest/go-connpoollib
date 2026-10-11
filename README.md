@@ -3,7 +3,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/dshlychkou/connpool.svg)](https://pkg.go.dev/github.com/dshlychkou/connpool)
 [![Build and Test](https://github.com/dshlychkou/connpool/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/dshlychkou/connpool/actions/workflows/build.yml)
 [![Lint](https://github.com/dshlychkou/connpool/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/dshlychkou/connpool/actions/workflows/lint.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/dshlychkou/connpool)](https://goreportcard.com/report/github.com/dshlychkou/connpool)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A small, dependency-free Go pool of reusable `net.Conn` connections for
