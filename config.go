@@ -128,7 +128,8 @@ func WithIdleTimeout(idleTimeout time.Duration) Option {
 }
 
 // WithLifespanTimeout sets the maximum age of a connection, after which it is
-// closed instead of reused. Defaults to 5m.
+// closed instead of reused. Each connection gets a random lifespan up to 10%
+// shorter, to spread reconnects. Defaults to 5m.
 func WithLifespanTimeout(lifespanTimeout time.Duration) Option {
 	return func(c *Config) {
 		c.lifespanTimeout = lifespanTimeout
