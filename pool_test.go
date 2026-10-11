@@ -2,33 +2,29 @@ package connpool
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/task"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
-type PoolSuite struct {
+type baseSuite struct {
 	suite.Suite
 	ln       net.Listener
 	port     int
 	attempts atomic.Int32
-	// onAttempt, when set, runs before each connect with the 1-based attempt number.
+	// onAttempt runs before each connect with the 1-based attempt number.
 	onAttempt func(n int32)
 }
 
-func TestPoolSuite(t *testing.T) {
-	suite.Run(t, new(PoolSuite))
-}
-
-func (s *PoolSuite) SetupTest() {
+func (s *baseSuite) SetupTest() {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
 	s.ln = ln
@@ -37,19 +33,18 @@ func (s *PoolSuite) SetupTest() {
 	s.onAttempt = nil
 }
 
-func (s *PoolSuite) TearDownTest() {
+func (s *baseSuite) TearDownTest() {
 	if s.ln != nil {
 		_ = s.ln.Close()
 	}
 }
 
-// stopListener closes the test listener so dials to s.port are refused.
-func (s *PoolSuite) stopListener() {
+func (s *baseSuite) stopListener() {
 	s.Require().NoError(s.ln.Close())
 	s.ln = nil
 }
 
-func (s *PoolSuite) dialer() *net.Dialer {
+func (s *baseSuite) dialer() *net.Dialer {
 	return &net.Dialer{
 		Timeout: time.Second,
 		Control: func(string, string, syscall.RawConn) error {
@@ -62,9 +57,10 @@ func (s *PoolSuite) dialer() *net.Dialer {
 	}
 }
 
-// newPool builds a pool aimed at the test listener; opts override the defaults.
-func (s *PoolSuite) newPool(opts ...Option) *ConnPool {
+// newPool targets the test listener with no warm-up, so dials can be counted.
+func (s *baseSuite) newPool(opts ...Option) *ConnPool {
 	base := []Option{
+		WithMinIdle(0),
 		WithPort(s.port),
 		WithDialer(s.dialer()),
 		WithDialBackoff(time.Millisecond, 5*time.Millisecond),
@@ -76,24 +72,52 @@ func (s *PoolSuite) newPool(opts ...Option) *ConnPool {
 	return pool
 }
 
-func (s *PoolSuite) closeConn(conn *Conn) {
+func (s *baseSuite) accept() <-chan net.Conn {
+	ch := make(chan net.Conn, 1)
+	go func() {
+		conn, err := s.ln.Accept()
+		if err == nil {
+			ch <- conn
+		}
+		close(ch)
+	}()
+	return ch
+}
+
+func (s *baseSuite) closeConn(conn *Conn) {
 	s.Require().NotNil(conn)
 	s.NoError(conn.Conn.Close())
 }
 
-func (s *PoolSuite) TestNewNilConfig() {
-	pool, err := New(nil)
-	s.Nil(pool)
-	s.ErrorIs(err, ErrNilConfig)
+func (s *baseSuite) eventually(cond func() bool) {
+	s.Eventually(cond, time.Second, 5*time.Millisecond)
 }
 
-func (s *PoolSuite) TestNewAppliesConfig() {
-	pool := s.newPool(WithMaxPoolSize(7), WithMaxConcurrency(3))
+type PoolSuite struct {
+	baseSuite
+}
 
-	s.Equal(7, cap(pool.idleChan))
-	s.Equal(3, pool.sem.Limit())
-	s.Equal(7, pool.Config().MaxPoolSize())
-	s.Equal(3, pool.Config().MaxConcurrency())
+func TestPoolSuite(t *testing.T) {
+	suite.Run(t, new(PoolSuite))
+}
+
+func (s *PoolSuite) TestNew() {
+	s.Run("nil config", func() {
+		pool, err := New(nil)
+		s.Nil(pool)
+		s.ErrorIs(err, ErrNilConfig)
+	})
+	s.Run("invalid config", func() {
+		pool, err := New(&Config{})
+		s.Nil(pool)
+		s.ErrorIs(err, ErrInvalidConnPoolCfg)
+	})
+	s.Run("applies config", func() {
+		pool := s.newPool(WithMaxPoolSize(7), WithMaxConcurrency(3))
+		s.Equal(7, cap(pool.idleChan))
+		s.Equal(7, cap(pool.slots))
+		s.Equal(3, cap(pool.dialTokens))
+	})
 }
 
 func (s *PoolSuite) TestAcquireDialsWhenNoIdle() {
@@ -103,26 +127,10 @@ func (s *PoolSuite) TestAcquireDialsWhenNoIdle() {
 	s.Require().NoError(err)
 	defer s.closeConn(conn)
 
-	s.Same(pool, conn.pool)
 	s.Equal(s.ln.Addr().String(), conn.RemoteAddr().String())
 	s.Equal(int32(1), s.attempts.Load())
-	s.Equal(0, pool.sem.Acquired())
-}
-
-func (s *PoolSuite) TestAcquireReturnsIdleWithoutDial() {
-	pool := s.newPool()
-	idle, err := pool.openConnection(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(idle)
-	s.attempts.Store(0)
-
-	pool.idleChan <- idle
-
-	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	s.Same(idle, conn)
-	s.Equal(int32(0), s.attempts.Load())
-	s.Equal(0, pool.sem.Acquired())
+	s.Len(pool.slots, 1)
+	s.Empty(pool.dialTokens)
 }
 
 func (s *PoolSuite) TestAcquireAfterPoolClose() {
@@ -132,13 +140,11 @@ func (s *PoolSuite) TestAcquireAfterPoolClose() {
 	conn, err := pool.Acquire(context.Background())
 	s.Nil(conn)
 	s.ErrorIs(err, ErrPoolAlreadyClosed)
-	s.Equal(0, pool.sem.Acquired())
 }
 
 func (s *PoolSuite) TestAcquireRetriesUntilSuccess() {
 	s.stopListener()
 	s.onAttempt = func(n int32) {
-		// Bring the server up right before the third connect.
 		if n == 3 {
 			ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(s.port)))
 			s.Require().NoError(err)
@@ -150,7 +156,6 @@ func (s *PoolSuite) TestAcquireRetriesUntilSuccess() {
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	defer s.closeConn(conn)
-
 	s.Equal(int32(3), s.attempts.Load())
 }
 
@@ -164,7 +169,8 @@ func (s *PoolSuite) TestAcquireGivesUpAfterMaxAttempts() {
 	s.ErrorIs(err, task.ErrMaxRetriesExceeded)
 	s.ErrorIs(err, syscall.ECONNREFUSED)
 	s.Equal(int32(4), s.attempts.Load())
-	s.Equal(0, pool.sem.Acquired())
+	s.Empty(pool.slots)
+	s.Empty(pool.dialTokens)
 }
 
 func (s *PoolSuite) TestAcquireBackoffHonorsAcquireTimeout() {
@@ -194,115 +200,56 @@ func (s *PoolSuite) TestAcquireCanceledContext() {
 	s.Nil(conn)
 	s.ErrorIs(err, context.Canceled)
 	s.Equal(int32(0), s.attempts.Load())
-	s.Equal(0, pool.sem.Acquired())
 }
 
-func (s *PoolSuite) TestAcquireSemaphoreTimeoutKeepsForeignSlots() {
+func (s *PoolSuite) TestAcquireTimeoutMidDialFreesSlot() {
+	pool := s.newPool(WithMaxPoolSize(1), WithAcquireTimeout(20*time.Millisecond))
+	s.onAttempt = func(int32) { time.Sleep(50 * time.Millisecond) }
+
+	conn, err := pool.Acquire(context.Background())
+	s.Nil(conn)
+	s.ErrorIs(err, ErrDialFailed)
+	s.ErrorIs(err, context.DeadlineExceeded)
+	s.Empty(pool.slots)
+	s.Empty(pool.dialTokens)
+
+	s.onAttempt = nil
+	conn, err = pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	s.closeConn(conn)
+}
+
+func (s *PoolSuite) TestAcquireTimesOutWhenDialsBusy() {
 	pool := s.newPool(WithMaxConcurrency(2), WithAcquireTimeout(20*time.Millisecond))
-	pool.sem.Acquire()
-	pool.sem.Acquire()
+	pool.dialTokens <- struct{}{}
+	pool.dialTokens <- struct{}{}
 
 	conn, err := pool.Acquire(context.Background())
 	s.Nil(conn)
 	s.ErrorIs(err, context.DeadlineExceeded)
 	s.Equal(int32(0), s.attempts.Load())
-	// A failed Acquire must not release slots it never held.
-	s.Equal(2, pool.sem.Acquired())
+	s.Len(pool.dialTokens, 2)
 }
 
-func (s *PoolSuite) TestOpenConnectionIDsAreUnique() {
-	pool := s.newPool()
+func (s *PoolSuite) TestAcquireTakesIdleWhileDialsBusy() {
+	pool := s.newPool(WithMaxConcurrency(1))
 
-	for range 3 {
-		conn, err := pool.openConnection(context.Background())
-		s.Require().NoError(err)
-		s.closeConn(conn)
-	}
-	s.Equal(uint64(3), pool.dialSeq.Load())
-}
-
-// accept returns the server side of the next accepted connection.
-func (s *PoolSuite) accept() <-chan net.Conn {
-	ch := make(chan net.Conn, 1)
-	go func() {
-		conn, err := s.ln.Accept()
-		if err == nil {
-			ch <- conn
-		}
-		close(ch)
-	}()
-	return ch
-}
-
-func (s *PoolSuite) TestConnCloseReturnsToPool() {
-	pool := s.newPool()
+	held, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	local := held.LocalAddr().String()
+	pool.dialTokens <- struct{}{}
+	defer func() { <-pool.dialTokens }()
+	time.AfterFunc(20*time.Millisecond, func() { _ = held.Close() })
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	local := conn.LocalAddr().String()
-	s.Require().NoError(conn.Close())
-	s.Len(pool.idleChan, 1)
-
-	again, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(again)
-
-	s.NotSame(conn, again)
-	s.Equal(local, again.LocalAddr().String())
+	defer s.closeConn(conn)
+	s.Equal(local, conn.LocalAddr().String())
 	s.Equal(int32(1), s.attempts.Load())
 }
 
-func (s *PoolSuite) TestConnDoubleCloseDoesNotDuplicate() {
-	pool := s.newPool()
-
-	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	s.Require().NoError(conn.Close())
-
-	s.ErrorIs(conn.Close(), net.ErrClosed)
-	s.Len(pool.idleChan, 1)
-}
-
-func (s *PoolSuite) TestConnCloseResetsDeadline() {
-	pool := s.newPool()
-
-	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	s.Require().NoError(conn.SetDeadline(time.Now().Add(-time.Second)))
-	s.Require().NoError(conn.Close())
-
-	again, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(again)
-
-	_, err = again.Write([]byte("ping"))
-	s.NoError(err)
-}
-
-func (s *PoolSuite) TestConnCloseDiscardsUnreadData() {
-	pool := s.newPool()
-	server := s.accept()
-
-	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	srv := <-server
-	s.Require().NotNil(srv)
-	defer srv.Close()
-
-	_, err = srv.Write([]byte("ab"))
-	s.Require().NoError(err)
-	// Read only part of the response, leaving "b" in the socket.
-	_, err = conn.Read(make([]byte, 1))
-	s.Require().NoError(err)
-
-	s.NoError(conn.Close())
-	s.Empty(pool.idleChan)
-	_, err = conn.Read(make([]byte, 1))
-	s.ErrorIs(err, net.ErrClosed)
-}
-
 func (s *PoolSuite) TestAcquireBlocksWhenPoolExhausted() {
-	pool := s.newPool(WithMaxPoolSize(1), WithMaxConcurrency(2), WithAcquireTimeout(50*time.Millisecond))
+	pool := s.newPool(WithMaxPoolSize(1), WithAcquireTimeout(50*time.Millisecond))
 
 	first, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
@@ -311,63 +258,28 @@ func (s *PoolSuite) TestAcquireBlocksWhenPoolExhausted() {
 	s.ErrorIs(err, context.DeadlineExceeded)
 	s.Equal(int32(1), s.attempts.Load())
 
-	// Releasing the only connection unblocks a waiting Acquire.
 	local := first.LocalAddr().String()
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = first.Close()
-	}()
+	time.AfterFunc(10*time.Millisecond, func() { _ = first.Close() })
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	defer s.closeConn(again)
 	s.Equal(local, again.LocalAddr().String())
 }
 
-func (s *PoolSuite) TestDiscardFreesSlot() {
-	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(20*time.Millisecond))
-
-	first, err := pool.Acquire(context.Background())
+func (s *PoolSuite) TestAcquireWaiterUnblockedByPoolClose() {
+	pool := s.newPool(WithMaxPoolSize(1), WithAcquireTimeout(time.Second))
+	held, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	time.Sleep(40 * time.Millisecond)
-	s.Require().NoError(first.Close())
+	time.AfterFunc(20*time.Millisecond, func() { _ = pool.Close() })
 
-	second, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(second)
-	s.Equal(int32(2), s.attempts.Load())
-}
-
-func (s *PoolSuite) TestConnCloseAfterPoolClose() {
-	pool := s.newPool()
-
+	start := time.Now()
 	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	s.Require().NoError(pool.Close())
+	s.Nil(conn)
+	s.ErrorIs(err, ErrPoolAlreadyClosed)
+	s.Less(time.Since(start), 500*time.Millisecond)
 
-	s.NoError(conn.Close())
-	_, err = conn.Read(make([]byte, 1))
-	s.ErrorIs(err, net.ErrClosed)
-}
-
-func (s *PoolSuite) TestPoolCloseClosesIdle() {
-	pool := s.newPool()
-
-	conn, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	s.Require().NoError(conn.Close())
-	idle := <-pool.idleChan
-	pool.idleChan <- idle
-
-	s.NoError(pool.Close())
-	_, err = idle.Read(make([]byte, 1))
-	s.ErrorIs(err, net.ErrClosed)
-}
-
-func (s *PoolSuite) TestPoolCloseTwice() {
-	pool := s.newPool()
-
-	s.NoError(pool.Close())
-	s.ErrorIs(pool.Close(), ErrPoolAlreadyClosed)
+	s.Require().NoError(held.Close())
+	s.Empty(pool.slots)
 }
 
 func (s *PoolSuite) TestAcquireEvictsIdleTimedOutConn() {
@@ -381,9 +293,9 @@ func (s *PoolSuite) TestAcquireEvictsIdleTimedOutConn() {
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	defer s.closeConn(again)
-
 	s.NotEqual(conn.LocalAddr().String(), again.LocalAddr().String())
 	s.Equal(int32(2), s.attempts.Load())
+	s.Len(pool.slots, 1)
 }
 
 func (s *PoolSuite) TestAcquireEvictsConnClosedByPeer() {
@@ -401,61 +313,193 @@ func (s *PoolSuite) TestAcquireEvictsConnClosedByPeer() {
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	defer s.closeConn(again)
-
 	s.Equal(int32(2), s.attempts.Load())
+	s.Len(pool.slots, 1)
 }
 
-func (s *PoolSuite) TestCloseDiscardsLifespanExpiredConn() {
-	pool := s.newPool(WithLifespanTimeout(20 * time.Millisecond))
+func (s *PoolSuite) TestAcquireResetsIdleTime() {
+	pool := s.newPool(WithIdleTimeout(time.Minute))
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	time.Sleep(40 * time.Millisecond)
 	s.Require().NoError(conn.Close())
+	idle := <-pool.idleChan
+	idle.idleSince = time.Now().Add(-59 * time.Second)
+	pool.idleChan <- idle
 
-	s.Empty(pool.idleChan)
-	_, err = conn.Read(make([]byte, 1))
+	again, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	s.False(again.expired(time.Now().Add(2 * time.Second)))
+	s.Require().NoError(again.Close())
+	s.Len(pool.idleChan, 1)
+}
+
+func (s *PoolSuite) TestDiscardFreesSlot() {
+	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(20*time.Millisecond))
+
+	first, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	time.Sleep(40 * time.Millisecond)
+	s.Require().NoError(first.Close())
+
+	second, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer s.closeConn(second)
+	s.Equal(int32(2), s.attempts.Load())
+}
+
+func (s *PoolSuite) TestPoolCloseDuringDial() {
+	pool := s.newPool()
+	s.onAttempt = func(int32) { time.Sleep(50 * time.Millisecond) }
+	time.AfterFunc(10*time.Millisecond, func() { _ = pool.Close() })
+
+	conn, err := pool.Acquire(context.Background())
+	s.Nil(conn)
+	s.ErrorIs(err, ErrPoolAlreadyClosed)
+	s.Empty(pool.slots)
+}
+
+func (s *PoolSuite) TestPoolCloseClosesIdle() {
+	pool := s.newPool()
+
+	conn, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	s.Require().NoError(conn.Close())
+	idle := <-pool.idleChan
+	pool.idleChan <- idle
+
+	s.NoError(pool.Close())
+	_, err = idle.Read(make([]byte, 1))
+	s.ErrorIs(err, net.ErrClosed)
+	s.Empty(pool.slots)
+}
+
+func (s *PoolSuite) TestPoolCloseWithCheckedOutConns() {
+	pool := s.newPool()
+	a, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	b, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+
+	s.Require().NoError(pool.Close())
+	s.Len(pool.slots, 2)
+
+	s.NoError(a.Close())
+	s.NoError(b.Close())
+	s.Empty(pool.slots)
+	_, err = a.Conn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
 }
 
-func TestConfigAddrIPv6(t *testing.T) {
-	cfg, err := NewConfig(WithHost("::1"), WithPort(5432))
-	require.NoError(t, err)
-	assert.Equal(t, "[::1]:5432", cfg.Addr())
+func (s *PoolSuite) TestPoolCloseTwice() {
+	pool := s.newPool()
+
+	s.NoError(pool.Close())
+	s.ErrorIs(pool.Close(), ErrPoolAlreadyClosed)
 }
 
-func TestConfigValidation(t *testing.T) {
-	tests := map[string][]Option{
-		"empty network":     {WithPort(1), WithNetwork("")},
-		"port too large":    {WithPort(70000)},
-		"minIdle above max": {WithPort(1), WithMinIdle(5), WithMaxPoolSize(2)},
-	}
-	for name, opts := range tests {
-		t.Run(name, func(t *testing.T) {
-			_, err := NewConfig(opts...)
-			assert.ErrorIs(t, err, ErrInvalidConnPoolCfg)
+func (s *PoolSuite) TestMinIdleWarmsUpAndRefills() {
+	pool := s.newPool(WithMinIdle(2))
+	defer func() { s.NoError(pool.Close()) }()
+
+	s.eventually(func() bool { return len(pool.idleChan) == 2 })
+	s.Equal(int32(2), s.attempts.Load())
+
+	conn, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer func() { s.NoError(conn.Close()) }()
+
+	s.eventually(func() bool { return len(pool.idleChan) == 2 })
+	s.Equal(int32(3), s.attempts.Load())
+}
+
+func (s *PoolSuite) TestMinIdleRespectsMaxPoolSize() {
+	pool := s.newPool(WithMinIdle(2), WithMaxPoolSize(2))
+	defer func() { s.NoError(pool.Close()) }()
+	s.eventually(func() bool { return len(pool.idleChan) == 2 })
+
+	a, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	b, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer s.closeConn(a)
+	defer s.closeConn(b)
+
+	s.Never(func() bool { return s.attempts.Load() > 2 }, 50*time.Millisecond, 5*time.Millisecond)
+	s.Len(pool.slots, 2)
+}
+
+func (s *PoolSuite) TestMinIdleReplacesExpired() {
+	pool := s.newPool(WithMinIdle(1), WithIdleTimeout(40*time.Millisecond))
+	defer func() { s.NoError(pool.Close()) }()
+	s.eventually(func() bool { return len(pool.idleChan) == 1 })
+
+	s.eventually(func() bool { return s.attempts.Load() >= 2 && len(pool.idleChan) == 1 })
+	s.Len(pool.slots, 1)
+}
+
+func (s *PoolSuite) TestMinIdleCloseDuringWarmUp() {
+	s.onAttempt = func(int32) { time.Sleep(50 * time.Millisecond) }
+	pool := s.newPool(WithMinIdle(2))
+	s.eventually(func() bool { return s.attempts.Load() == 1 })
+
+	s.Require().NoError(pool.Close())
+	s.Empty(pool.slots)
+	s.Empty(pool.idleChan)
+	s.Empty(pool.dialTokens)
+}
+
+func (s *PoolSuite) TestConcurrentAcquireRelease() {
+	const maxPool = 3
+	pool := s.newPool(WithMaxPoolSize(maxPool), WithMaxConcurrency(2))
+	defer func() { s.NoError(pool.Close()) }()
+
+	var held, peak atomic.Int32
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			for range 20 {
+				conn, err := pool.Acquire(context.Background())
+				if !s.NoError(err) {
+					return
+				}
+				n := held.Add(1)
+				for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+				}
+				_, err = conn.Write([]byte("x"))
+				s.NoError(err)
+				held.Add(-1)
+				s.NoError(conn.Close())
+			}
 		})
 	}
+	wg.Wait()
+
+	s.LessOrEqual(peak.Load(), int32(maxPool))
+	s.LessOrEqual(s.attempts.Load(), int32(maxPool))
+	s.LessOrEqual(len(pool.slots), maxPool)
+	s.Empty(pool.dialTokens)
 }
 
-func TestConfigUnixSocketNeedsNoPort(t *testing.T) {
-	cfg, err := NewConfig(WithNetwork("unix"), WithHost("/tmp/pool.sock"))
-	require.NoError(t, err)
-	assert.Equal(t, "/tmp/pool.sock", cfg.Addr())
-}
+func (s *PoolSuite) TestConcurrentPoolClose() {
+	pool := s.newPool(WithMaxPoolSize(4))
 
-func TestConfigDialerNotShared(t *testing.T) {
-	a, err := NewConfig(WithPort(1))
-	require.NoError(t, err)
-	b, err := NewConfig(WithPort(1))
-	require.NoError(t, err)
-	assert.NotSame(t, a.dialer, b.dialer)
-}
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			for {
+				conn, err := pool.Acquire(context.Background())
+				if err != nil {
+					s.True(errors.Is(err, ErrPoolAlreadyClosed), err)
+					return
+				}
+				s.NoError(conn.Close())
+			}
+		})
+	}
+	time.AfterFunc(20*time.Millisecond, func() { s.NoError(pool.Close()) })
+	wg.Wait()
 
-func TestNoFinalDelay(t *testing.T) {
-	cfg, err := NewConfig(WithPort(1), WithDialMaxAttempts(3), WithDialBackoff(time.Second, time.Minute), WithDialBackoffJitter(false))
-	require.NoError(t, err)
-	assert.Positive(t, cfg.dialBackoff.Delay(0))
-	assert.Positive(t, cfg.dialBackoff.Delay(1))
-	assert.Zero(t, cfg.dialBackoff.Delay(2))
+	s.Empty(pool.slots)
+	s.Empty(pool.dialTokens)
 }

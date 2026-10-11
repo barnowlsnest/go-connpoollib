@@ -49,17 +49,54 @@ func (c *Conn) Close() error {
 	return c.pool.release(c)
 }
 
+// Read returns net.ErrClosed after Close: the connection may be lent out again.
+func (c *Conn) Read(b []byte) (int, error) {
+	if c.released.Load() {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Read(b)
+}
+
+// Write returns net.ErrClosed after Close: the connection may be lent out again.
+func (c *Conn) Write(b []byte) (int, error) {
+	if c.released.Load() {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *Conn) SetDeadline(t time.Time) error {
+	if c.released.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	if c.released.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	if c.released.Load() {
+		return net.ErrClosed
+	}
+	return c.Conn.SetWriteDeadline(t)
+}
+
 // reusable reports whether the connection is idle and healthy: nothing is
 // waiting to be read and the peer has not closed it. Deadlines are cleared.
 func (c *Conn) reusable() bool {
-	if err := c.SetReadDeadline(time.Now().Add(connCheckTimeout)); err != nil {
+	if err := c.Conn.SetReadDeadline(time.Now().Add(connCheckTimeout)); err != nil {
 		return false
 	}
-	_, err := c.Read(make([]byte, 1))
+	_, err := c.Conn.Read(make([]byte, 1))
 	var nerr net.Error
 	if !errors.As(err, &nerr) || !nerr.Timeout() {
 		return false
 	}
 
-	return c.SetDeadline(time.Time{}) == nil
+	return c.Conn.SetDeadline(time.Time{}) == nil
 }
