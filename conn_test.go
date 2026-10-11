@@ -83,6 +83,28 @@ func (s *ConnSuite) TestDoubleClose() {
 	s.Len(pool.slots, 1)
 }
 
+func (s *ConnSuite) TestDiscard() {
+	pool := s.newPool(WithMaxPoolSize(1))
+
+	conn, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	s.Require().NoError(conn.Discard())
+
+	s.Empty(pool.idleChan)
+	s.Empty(pool.slots)
+	s.Equal(int64(1), pool.Stats().Discarded)
+	_, err = conn.netConn.Read(make([]byte, 1))
+	s.ErrorIs(err, net.ErrClosed)
+	s.ErrorIs(conn.Discard(), net.ErrClosed)
+	s.ErrorIs(conn.Close(), net.ErrClosed)
+
+	// The freed slot allows a new dial.
+	again, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer s.closeConn(again)
+	s.Equal(int32(2), s.attempts.Load())
+}
+
 func (s *ConnSuite) TestReleasedHandleRejectsIO() {
 	pool := s.newPool()
 	server := s.accept()
@@ -161,7 +183,7 @@ func (s *ConnSuite) TestCloseDiscardsLifespanExpired() {
 
 	s.Empty(pool.idleChan)
 	s.Empty(pool.slots)
-	_, err = conn.Conn.Read(make([]byte, 1))
+	_, err = conn.netConn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
 
 	again, err := pool.Acquire(context.Background())
@@ -179,7 +201,7 @@ func (s *ConnSuite) TestCloseAfterPoolClose() {
 
 	s.NoError(conn.Close())
 	s.Empty(pool.slots)
-	_, err = conn.Conn.Read(make([]byte, 1))
+	_, err = conn.netConn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
 }
 
@@ -213,21 +235,21 @@ func (s *ConnSuite) TestReusable() {
 	s.Run("tls idle with session tickets", func() {
 		conn, server := tlsPair()
 		defer server.Close()
-		defer conn.Conn.Close()
+		defer conn.netConn.Close()
 		s.True(conn.reusable())
 		s.True(conn.reusable())
 	})
 	s.Run("tls unread data", func() {
 		conn, server := tlsPair()
 		defer server.Close()
-		defer conn.Conn.Close()
+		defer conn.netConn.Close()
 		_, err := server.Write([]byte("x"))
 		s.Require().NoError(err)
 		s.eventually(func() bool { return !conn.reusable() })
 	})
 	s.Run("tls peer closed", func() {
 		conn, server := tlsPair()
-		defer conn.Conn.Close()
+		defer conn.netConn.Close()
 		s.Require().NoError(server.Close())
 		s.eventually(func() bool { return !conn.reusable() })
 	})

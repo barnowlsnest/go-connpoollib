@@ -35,6 +35,8 @@ type Stats struct {
 	// UnhealthyClosed is the number of connections closed by a failed health
 	// probe: unread data, or closed by the peer.
 	UnhealthyClosed int64 `json:"unhealthy_closed"`
+	// Discarded is the number of connections closed by Conn.Discard.
+	Discarded int64 `json:"discarded"`
 }
 
 type poolStats struct {
@@ -46,6 +48,7 @@ type poolStats struct {
 	idleClosed      atomic.Int64
 	lifespanClosed  atomic.Int64
 	unhealthyClosed atomic.Int64
+	discarded       atomic.Int64
 }
 
 // Stats returns a snapshot of the pool statistics. It is safe to call after Close.
@@ -64,6 +67,7 @@ func (pool *ConnPool) Stats() Stats {
 		IdleClosed:      pool.stats.idleClosed.Load(),
 		LifespanClosed:  pool.stats.lifespanClosed.Load(),
 		UnhealthyClosed: pool.stats.unhealthyClosed.Load(),
+		Discarded:       pool.stats.discarded.Load(),
 	}
 }
 
