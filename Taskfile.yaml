@@ -1,0 +1,54 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  ALL: ./...
+
+env:
+  MODULE_PATH: github.com/dshlychkou/connpool
+
+tasks:
+  go-update:
+    cmds:
+      - go mod tidy
+
+  go-build:
+    cmds:
+      - go build '{{.ALL}}'
+
+  go-fmt:
+    cmds:
+      - go fmt '{{.ALL}}'
+
+  go-vet:
+    cmds:
+      - go vet '{{.ALL}}'
+
+  go-test:
+    cmds:
+      - go test -v -race -cover '{{.ALL}}'
+
+  go-lint:
+    cmds:
+      - golangci-lint run --fix
+
+  go-clean:
+    cmds:
+      - go clean -testcache
+
+  sanity:
+    deps:
+      - go-update
+      - go-clean
+    cmds:
+      - task: go-fmt
+      - task: go-vet
+      - task: go-lint
+      - task: go-test
+
+  build:
+    deps:
+      - sanity
+    cmds:
+      - task: go-build
