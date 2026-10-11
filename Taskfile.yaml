@@ -29,6 +29,10 @@ tasks:
     cmds:
       - go test -v -race -cover '{{.ALL}}'
 
+  go-bench:
+    cmds:
+      - go test -run '^$' -bench . -benchtime 100x '{{.ALL}}'
+
   go-lint:
     cmds:
       - golangci-lint run --fix

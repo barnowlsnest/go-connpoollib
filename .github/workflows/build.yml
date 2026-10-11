@@ -29,3 +29,7 @@ jobs:
 
       - name: Test
         run: task go-test
+
+      # Smoke run: keeps benchmarks compiling and running; numbers are not gated.
+      - name: Benchmark
+        run: task go-bench
