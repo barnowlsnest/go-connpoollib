@@ -9,7 +9,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # probe_unix.go has OS-specific syscall behavior: test both linux and darwin.
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
