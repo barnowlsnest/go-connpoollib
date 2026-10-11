@@ -11,24 +11,28 @@ import (
 	"github.com/barnowlsnest/go-asynctasklib/v2/pkg/task"
 )
 
-type (
-	ConnPool struct {
-		idleChan   chan *Conn
-		closedChan chan struct{}
-		refillChan chan struct{}
-		slots      chan struct{}
-		dialTokens chan struct{}
-		cfg        *Config
-		mux        sync.Mutex
-		wg         sync.WaitGroup
-		closed     atomic.Bool
-	}
-)
+// ConnPool is a pool of reusable connections. It maintains a set of idle connections and dials new ones on demand,
+// up to MaxPoolSize open connections and MaxConcurrency concurrent dials.
+// It is safe for concurrent use.
+// Connections are closed when they expire or become unfit for reuse.
+type ConnPool struct {
+	idleChan   chan *Conn
+	closedChan chan struct{}
+	refillChan chan struct{}
+	slots      chan struct{}
+	dialTokens chan struct{}
+	cfg        *Config
+	mux        sync.Mutex
+	wg         sync.WaitGroup
+	closed     atomic.Bool
+}
 
 // errConnDiscarded reports that an idle connection was unfit and closed; the
 // caller should try again.
 var errConnDiscarded = errors.New("idle connection discarded")
 
+// New returns a pool for cfg and, if MinIdle is positive, starts filling it
+// with idle connections in the background. Call Close to release resources.
 func New(cfg *Config) (*ConnPool, error) {
 	if cfg == nil {
 		return nil, ErrNilConfig
@@ -52,11 +56,14 @@ func New(cfg *Config) (*ConnPool, error) {
 	return pool, nil
 }
 
+// Config returns the pool configuration.
 func (pool *ConnPool) Config() *Config {
 	return pool.cfg
 }
 
-// Acquire returns an idle connection or dials a new one.
+// Acquire returns an idle connection or dials a new one. It waits up to
+// AcquireTimeout, or until ctx is done, for a free slot. The caller must Close
+// the returned connection to return it to the pool.
 func (pool *ConnPool) Acquire(ctx context.Context) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, pool.cfg.AcquireTimeout())
 	defer cancel()

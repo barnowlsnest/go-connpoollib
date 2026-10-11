@@ -49,8 +49,10 @@ func isUnixNetwork(network string) bool {
 }
 
 type (
+	// Option configures a Config.
 	Option func(*Config)
 
+	// Config holds pool settings. Create it with NewConfig.
 	Config struct {
 		dialBackoff       retry.Strategy
 		dialer            *net.Dialer
@@ -70,60 +72,79 @@ type (
 	}
 )
 
+// WithNetwork sets the network passed to the dialer, e.g. "tcp" or "unix".
+// Defaults to "tcp".
 func WithNetwork(network string) Option {
 	return func(c *Config) {
 		c.network = network
 	}
 }
 
+// WithHost sets the host to dial, or the socket path for unix networks.
+// Defaults to "127.0.0.1".
 func WithHost(host string) Option {
 	return func(c *Config) {
 		c.host = host
 	}
 }
 
+// WithPort sets the port to dial. It is required for non-unix networks.
 func WithPort(port int) Option {
 	return func(c *Config) {
 		c.port = port
 	}
 }
 
+// WithMinIdle sets the number of idle connections the pool keeps open in the
+// background. Zero disables background filling. Defaults to 1.
 func WithMinIdle(minIdle int) Option {
 	return func(c *Config) {
 		c.minIdle = minIdle
 	}
 }
 
+// WithMaxPoolSize sets the maximum number of open connections, idle and
+// checked out combined. Defaults to 10.
 func WithMaxPoolSize(maxPoolSize int) Option {
 	return func(c *Config) {
 		c.maxPoolSize = maxPoolSize
 	}
 }
 
+// WithMaxConcurrency sets the maximum number of connections being dialed at
+// the same time. Defaults to 2.
 func WithMaxConcurrency(maxConcurrency int) Option {
 	return func(c *Config) {
 		c.maxConcurrency = maxConcurrency
 	}
 }
 
+// WithIdleTimeout sets how long a connection may stay idle before it is
+// closed. Defaults to 30s.
 func WithIdleTimeout(idleTimeout time.Duration) Option {
 	return func(c *Config) {
 		c.idleTimeout = idleTimeout
 	}
 }
 
+// WithLifespanTimeout sets the maximum age of a connection, after which it is
+// closed instead of reused. Defaults to 5m.
 func WithLifespanTimeout(lifespanTimeout time.Duration) Option {
 	return func(c *Config) {
 		c.lifespanTimeout = lifespanTimeout
 	}
 }
 
+// WithDialer sets the dialer used to open connections. Defaults to a dialer
+// with a 5s timeout and 30s keep-alive.
 func WithDialer(dialer *net.Dialer) Option {
 	return func(c *Config) {
 		c.dialer = dialer
 	}
 }
 
+// WithAcquireTimeout bounds how long Acquire waits for a connection, dial
+// retries included. Defaults to 5s.
 func WithAcquireTimeout(acquireTimeout time.Duration) Option {
 	return func(c *Config) {
 		c.acquireTimeout = acquireTimeout
@@ -155,6 +176,8 @@ func WithDialBackoffJitter(jitter bool) Option {
 	}
 }
 
+// NewConfig returns a Config with defaults overridden by opts. It returns an
+// error wrapping ErrInvalidConnPoolCfg if the result is invalid.
 func NewConfig(opts ...Option) (*Config, error) {
 	cfg := &Config{
 		host:            defaultHost,
@@ -194,58 +217,73 @@ func NewConfig(opts ...Option) (*Config, error) {
 	return cfg, nil
 }
 
+// Network returns the network passed to the dialer.
 func (cfg *Config) Network() string {
 	return cfg.network
 }
 
+// Host returns the host to dial, or the socket path for unix networks.
 func (cfg *Config) Host() string {
 	return cfg.host
 }
 
+// Port returns the port to dial.
 func (cfg *Config) Port() int {
 	return cfg.port
 }
 
+// MinIdle returns the number of idle connections kept open in the background.
 func (cfg *Config) MinIdle() int {
 	return cfg.minIdle
 }
 
+// MaxPoolSize returns the maximum number of open connections.
 func (cfg *Config) MaxPoolSize() int {
 	return cfg.maxPoolSize
 }
 
+// MaxConcurrency returns the maximum number of concurrent dials.
 func (cfg *Config) MaxConcurrency() int {
 	return cfg.maxConcurrency
 }
 
+// IdleTimeout returns how long a connection may stay idle.
 func (cfg *Config) IdleTimeout() time.Duration {
 	return cfg.idleTimeout
 }
 
+// LifespanTimeout returns the maximum age of a connection.
 func (cfg *Config) LifespanTimeout() time.Duration {
 	return cfg.lifespanTimeout
 }
 
+// AcquireTimeout returns how long Acquire waits for a connection.
 func (cfg *Config) AcquireTimeout() time.Duration {
 	return cfg.acquireTimeout
 }
 
+// DialMaxAttempts returns the total number of dial attempts per connection.
 func (cfg *Config) DialMaxAttempts() int {
 	return cfg.dialMaxAttempts
 }
 
+// DialBackoffBase returns the base delay of the dial backoff.
 func (cfg *Config) DialBackoffBase() time.Duration {
 	return cfg.dialBackoffBase
 }
 
+// DialBackoffMax returns the maximum delay of the dial backoff.
 func (cfg *Config) DialBackoffMax() time.Duration {
 	return cfg.dialBackoffMax
 }
 
+// DialBackoffJitter reports whether dial backoff delays are jittered.
 func (cfg *Config) DialBackoffJitter() bool {
 	return cfg.dialBackoffJitter
 }
 
+// Addr returns the dial address: host:port, or the host alone for unix
+// networks.
 func (cfg *Config) Addr() string {
 	if isUnixNetwork(cfg.network) {
 		return cfg.host

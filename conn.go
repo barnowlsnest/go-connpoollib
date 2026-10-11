@@ -9,6 +9,8 @@ import (
 
 const connCheckTimeout = time.Millisecond
 
+// Conn is a pooled connection. It wraps a net.Conn and returns it to the pool
+// on Close instead of closing it. A Conn must not be used after Close.
 type Conn struct {
 	createdAt time.Time
 	idleSince time.Time
@@ -65,6 +67,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+// SetDeadline returns net.ErrClosed after Close.
 func (c *Conn) SetDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
@@ -72,6 +75,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 	return c.Conn.SetDeadline(t)
 }
 
+// SetReadDeadline returns net.ErrClosed after Close.
 func (c *Conn) SetReadDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
@@ -79,6 +83,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 	return c.Conn.SetReadDeadline(t)
 }
 
+// SetWriteDeadline returns net.ErrClosed after Close.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	if c.released.Load() {
 		return net.ErrClosed
