@@ -1,4 +1,4 @@
-# connpool
+# go-connpoollib
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/dshlychkou/connpool.svg)](https://pkg.go.dev/github.com/dshlychkou/connpool)
 [![Build and Test](https://github.com/dshlychkou/connpool/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/dshlychkou/connpool/actions/workflows/build.yml)
