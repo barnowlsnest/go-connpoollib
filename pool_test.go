@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -598,4 +600,61 @@ func (s *PoolSuite) TestConcurrentPoolClose() {
 
 	s.Empty(pool.slots)
 	s.Empty(pool.dialTokens)
+}
+
+// BenchmarkAcquireClose guards the hot path: an idle checkout and return run the
+// health probe twice, so a blocking probe shows up as milliseconds per op.
+func BenchmarkAcquireClose(b *testing.B) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, conn) }()
+		}
+	}()
+
+	newPool := func(b *testing.B, size int) *ConnPool {
+		// No background filler: its allocations would count against the op.
+		cfg, err := NewConfig(
+			WithMinIdle(0),
+			WithPort(ln.Addr().(*net.TCPAddr).Port),
+			WithMaxPoolSize(size),
+			WithMaxConcurrency(size),
+		)
+		require.NoError(b, err)
+		pool, err := New(cfg)
+		require.NoError(b, err)
+		b.Cleanup(func() { _ = pool.Close() })
+		return pool
+	}
+	ctx := context.Background()
+
+	b.Run("serial", func(b *testing.B) {
+		pool := newPool(b, 1)
+		b.ReportAllocs()
+		for b.Loop() {
+			conn, err := pool.Acquire(ctx)
+			require.NoError(b, err)
+			require.NoError(b, conn.Close())
+		}
+	})
+
+	b.Run("parallel", func(b *testing.B) {
+		pool := newPool(b, 64)
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				conn, err := pool.Acquire(ctx)
+				if !assert.NoError(b, err) {
+					return
+				}
+				assert.NoError(b, conn.Close())
+			}
+		})
+	})
 }

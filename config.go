@@ -137,8 +137,8 @@ func WithDialer(dialer *net.Dialer) Option {
 }
 
 // WithDialFunc sets the function used to open connections, e.g. the
-// DialContext method of a *tls.Dialer or a proxy dialer. It overrides
-// WithDialer.
+// DialContext method of a *tls.Dialer or a proxy dialer. WithDialer and
+// WithDialFunc set the same dialer, so the last one passed wins.
 func WithDialFunc(dial DialFunc) Option {
 	return func(c *Config) {
 		c.dialFunc = dial
