@@ -283,12 +283,14 @@ func (s *PoolSuite) TestAcquireWaiterUnblockedByPoolClose() {
 }
 
 func (s *PoolSuite) TestAcquireEvictsIdleTimedOutConn() {
-	pool := s.newPool(WithIdleTimeout(20 * time.Millisecond))
+	pool := s.newPool(WithIdleTimeout(time.Minute))
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	s.Require().NoError(conn.Close())
-	time.Sleep(40 * time.Millisecond)
+	idle := <-pool.idleChan
+	idle.idleSince = time.Now().Add(-time.Minute)
+	pool.idleChan <- idle
 
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
@@ -336,20 +338,6 @@ func (s *PoolSuite) TestAcquireResetsIdleTime() {
 	s.False(again.expired(time.Now().Add(2 * time.Second)))
 	s.Require().NoError(again.Close())
 	s.Len(pool.idleChan, 1)
-}
-
-func (s *PoolSuite) TestDiscardFreesSlot() {
-	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(20*time.Millisecond))
-
-	first, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	time.Sleep(40 * time.Millisecond)
-	s.Require().NoError(first.Close())
-
-	second, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(second)
-	s.Equal(int32(2), s.attempts.Load())
 }
 
 func (s *PoolSuite) TestPoolCloseDuringDial() {

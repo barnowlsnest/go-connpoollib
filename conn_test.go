@@ -136,17 +136,22 @@ func (s *ConnSuite) TestCloseDiscardsUnreadData() {
 }
 
 func (s *ConnSuite) TestCloseDiscardsLifespanExpired() {
-	pool := s.newPool(WithLifespanTimeout(20 * time.Millisecond))
+	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(time.Hour))
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	s.eventually(func() bool { return conn.expired(time.Now()) })
+	conn.createdAt = time.Now().Add(-time.Hour)
 	s.Require().NoError(conn.Close())
 
 	s.Empty(pool.idleChan)
 	s.Empty(pool.slots)
 	_, err = conn.Conn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
+
+	again, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer s.closeConn(again)
+	s.Equal(int32(2), s.attempts.Load())
 }
 
 func (s *ConnSuite) TestCloseAfterPoolClose() {

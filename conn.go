@@ -44,7 +44,8 @@ func (c *Conn) Close() error {
 	if c.released.Swap(true) {
 		return net.ErrClosed
 	}
-	if c.expired(time.Now()) || !c.reusable() {
+	// Skip the reusable probe when release would reject the conn anyway.
+	if c.pool.closed.Load() || c.expired(time.Now()) || !c.reusable() {
 		return c.pool.closeConn(c)
 	}
 
