@@ -31,6 +31,9 @@ type ConnPool struct {
 // caller should try again.
 var errConnDiscarded = errors.New("idle connection discarded")
 
+// errNoFreeSlot reports that the pool already holds MaxPoolSize connections.
+var errNoFreeSlot = errors.New("no free slot")
+
 // New returns a pool for cfg and, if MinIdle is positive, starts filling it
 // with idle connections in the background. Call Close to release resources.
 func New(cfg *Config) (*ConnPool, error) {
@@ -210,7 +213,7 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 
 	var lastErr error
 	for attempt := range pool.cfg.DialMaxAttempts() {
-		conn, err := pool.cfg.dialer.DialContext(ctx, pool.cfg.Network(), pool.cfg.Addr())
+		conn, err := pool.cfg.dialFunc(ctx, pool.cfg.Network(), pool.cfg.Addr())
 		if err == nil {
 			if pool.closed.Load() {
 				_ = conn.Close()
@@ -300,20 +303,12 @@ func (pool *ConnPool) maintainIdle() {
 
 func (pool *ConnPool) fillIdle() {
 	for len(pool.idleChan) < pool.cfg.MinIdle() {
-		select {
-		case pool.slots <- struct{}{}:
-		default:
-			return
-		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), pool.cfg.AcquireTimeout())
-		conn, err := pool.dialWithToken(ctx)
+		conn, err := pool.dialIdle(ctx)
 		cancel()
 		if err != nil {
-			<-pool.slots
 			return
 		}
-		conn.idleSince = time.Now()
 		if !pool.putIdle(conn) {
 			_ = conn.Conn.Close()
 			<-pool.slots
@@ -322,7 +317,10 @@ func (pool *ConnPool) fillIdle() {
 	}
 }
 
-func (pool *ConnPool) dialWithToken(ctx context.Context) (*Conn, error) {
+// dialIdle dials a connection into a free slot. It takes the dial token before
+// the slot, as Acquire does, and never waits for the slot: holding a slot while
+// waiting for a token deadlocks with an Acquire holding the token.
+func (pool *ConnPool) dialIdle(ctx context.Context) (*Conn, error) {
 	select {
 	case pool.dialTokens <- struct{}{}:
 		defer func() { <-pool.dialTokens }()
@@ -331,7 +329,19 @@ func (pool *ConnPool) dialWithToken(ctx context.Context) (*Conn, error) {
 	case <-pool.closedChan:
 		return nil, ErrPoolAlreadyClosed
 	}
-	return pool.openConnection(ctx)
+	select {
+	case pool.slots <- struct{}{}:
+	default:
+		return nil, errNoFreeSlot
+	}
+
+	conn, err := pool.openConnection(ctx)
+	if err != nil {
+		<-pool.slots
+		return nil, err
+	}
+	conn.idleSince = time.Now()
+	return conn, nil
 }
 
 func (pool *ConnPool) evictIdle() {

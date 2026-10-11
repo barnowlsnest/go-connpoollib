@@ -8,25 +8,31 @@ import (
 	"syscall"
 )
 
-// probeIdle does a non-blocking read on the socket. idle is true only if the
-// read would block: no unread data and no EOF from the peer. supported is
-// false if conn does not expose its file descriptor.
-func probeIdle(conn net.Conn) (idle, supported bool) {
+// peekSocket peeks at conn's socket without blocking or consuming data.
+func peekSocket(conn net.Conn) sockState {
 	sc, ok := conn.(syscall.Conn)
 	if !ok {
-		return false, false
+		return sockUnknown
 	}
 	raw, err := sc.SyscallConn()
 	if err != nil {
-		return false, false
+		return sockUnknown
 	}
 
+	state := sockClosed
 	err = raw.Read(func(fd uintptr) bool {
 		var buf [1]byte
-		_, rerr := syscall.Read(int(fd), buf[:])
-		idle = errors.Is(rerr, syscall.EAGAIN) || errors.Is(rerr, syscall.EWOULDBLOCK)
+		n, _, rerr := syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK)
+		switch {
+		case n > 0:
+			state = sockData
+		case errors.Is(rerr, syscall.EAGAIN) || errors.Is(rerr, syscall.EWOULDBLOCK):
+			state = sockIdle
+		}
 		return true
 	})
-
-	return err == nil && idle, true
+	if err != nil {
+		return sockClosed
+	}
+	return state
 }

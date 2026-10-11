@@ -103,6 +103,16 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+// sockState is the result of a non-blocking peek at a socket.
+type sockState int
+
+const (
+	sockUnknown sockState = iota // no file descriptor or unsupported platform
+	sockIdle                     // nothing to read
+	sockData                     // unread bytes
+	sockClosed                   // EOF or error
+)
+
 // reusable reports whether the connection is idle and healthy: nothing is
 // waiting to be read and the peer has not closed it. Deadlines are cleared.
 func (c *Conn) reusable() bool {
@@ -110,8 +120,23 @@ func (c *Conn) reusable() bool {
 	if err := c.Conn.SetDeadline(time.Time{}); err != nil {
 		return false
 	}
-	if idle, ok := probeIdle(c.Conn); ok {
-		return idle
+
+	sock, wrapped := c.Conn, false
+	if w, ok := sock.(interface{ NetConn() net.Conn }); ok { // e.g. *tls.Conn
+		sock, wrapped = w.NetConn(), true
+	}
+	switch peekSocket(sock) {
+	case sockIdle:
+		return true
+	case sockClosed:
+		return false
+	case sockData:
+		// Under a wrapper the bytes may be protocol records (e.g. TLS session
+		// tickets) that only the wrapper's Read can tell from caller data.
+		if !wrapped {
+			return false
+		}
+	case sockUnknown:
 	}
 
 	// Fallback: a short blocking read that must time out.

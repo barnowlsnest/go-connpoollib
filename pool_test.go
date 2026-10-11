@@ -2,7 +2,14 @@ package connpool
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"math/big"
 	"net"
 	"strconv"
 	"sync"
@@ -70,6 +77,31 @@ func (s *baseSuite) newPool(opts ...Option) *ConnPool {
 	pool, err := New(cfg)
 	s.Require().NoError(err)
 	return pool
+}
+
+// tlsConfigs returns a TLS 1.3 server config with a self-signed certificate
+// and a client config that trusts it.
+func (s *baseSuite) tlsConfigs() (server, client *tls.Config) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	s.Require().NoError(err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		DNSNames:     []string{"localhost"},
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	s.Require().NoError(err)
+	cert, err := x509.ParseCertificate(der)
+	s.Require().NoError(err)
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+
+	server = &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+		MinVersion:   tls.VersionTLS13,
+	}
+	client = &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS13}
+	return server, client
 }
 
 func (s *baseSuite) accept() <-chan net.Conn {
@@ -448,6 +480,59 @@ func (s *PoolSuite) TestMinIdleReplacesExpired() {
 
 	s.eventually(func() bool { return s.attempts.Load() >= 2 && len(pool.idleChan) == 1 })
 	s.Len(pool.slots, 1)
+}
+
+func (s *PoolSuite) TestFillIdleTakesDialTokenBeforeSlot() {
+	pool := s.newPool(WithMaxPoolSize(1), WithMaxConcurrency(1))
+	pool.cfg.minIdle = 1
+	pool.dialTokens <- struct{}{} // held by an Acquire waiting for a slot
+
+	var wg sync.WaitGroup
+	wg.Go(pool.fillIdle)
+	s.Never(func() bool { return len(pool.slots) > 0 }, 50*time.Millisecond, 5*time.Millisecond)
+
+	<-pool.dialTokens
+	wg.Wait()
+	s.Len(pool.idleChan, 1)
+	s.Len(pool.slots, 1)
+	s.NoError(pool.Close())
+	s.Empty(pool.slots)
+}
+
+func (s *PoolSuite) TestAcquireOverTLS() {
+	serverCfg, clientCfg := s.tlsConfigs()
+	ln := s.ln
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				tc := tls.Server(conn, serverCfg)
+				defer tc.Close()
+				_, _ = io.Copy(tc, tc)
+			}()
+		}
+	}()
+	tlsDialer := &tls.Dialer{NetDialer: s.dialer(), Config: clientCfg}
+	pool := s.newPool(WithDialFunc(tlsDialer.DialContext), WithMaxPoolSize(1))
+	defer func() { s.NoError(pool.Close()) }()
+
+	for range 3 {
+		conn, err := pool.Acquire(context.Background())
+		s.Require().NoError(err)
+		s.IsType(&tls.Conn{}, conn.Conn)
+		_, err = conn.Write([]byte("ping"))
+		s.Require().NoError(err)
+		buf := make([]byte, 4)
+		_, err = io.ReadFull(conn, buf)
+		s.Require().NoError(err)
+		s.Equal("ping", string(buf))
+		s.Require().NoError(conn.Close())
+	}
+	s.Equal(int32(1), s.attempts.Load())
+	s.Len(pool.idleChan, 1)
 }
 
 func (s *PoolSuite) TestMinIdleCloseDuringWarmUp() {

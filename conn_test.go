@@ -2,6 +2,7 @@ package connpool
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"testing"
 	"time"
@@ -194,5 +195,40 @@ func (s *ConnSuite) TestReusable() {
 		client, server := net.Pipe()
 		s.Require().NoError(server.Close())
 		s.False(newConn(client, pool).reusable())
+	})
+
+	serverCfg, clientCfg := s.tlsConfigs()
+	tlsPair := func() (*Conn, *tls.Conn) {
+		accepted := s.accept()
+		raw, err := net.Dial("tcp", s.ln.Addr().String())
+		s.Require().NoError(err)
+		srvRaw := <-accepted
+		s.Require().NotNil(srvRaw)
+		server := tls.Server(srvRaw, serverCfg)
+		go func() { _ = server.Handshake() }()
+		client := tls.Client(raw, clientCfg)
+		s.Require().NoError(client.Handshake())
+		return newConn(client, pool), server
+	}
+	s.Run("tls idle with session tickets", func() {
+		conn, server := tlsPair()
+		defer server.Close()
+		defer conn.Conn.Close()
+		s.True(conn.reusable())
+		s.True(conn.reusable())
+	})
+	s.Run("tls unread data", func() {
+		conn, server := tlsPair()
+		defer server.Close()
+		defer conn.Conn.Close()
+		_, err := server.Write([]byte("x"))
+		s.Require().NoError(err)
+		s.eventually(func() bool { return !conn.reusable() })
+	})
+	s.Run("tls peer closed", func() {
+		conn, server := tlsPair()
+		defer conn.Conn.Close()
+		s.Require().NoError(server.Close())
+		s.eventually(func() bool { return !conn.reusable() })
 	})
 }
