@@ -22,20 +22,35 @@ func (s *ConnSuite) TestExpired() {
 	now := time.Now()
 
 	tests := map[string]struct {
-		conn    *Conn
-		expired bool
+		createdAt time.Time
+		idleSince time.Time
+		expired   bool
 	}{
-		"fresh":          {&Conn{pool: pool, createdAt: now}, false},
-		"checked out":    {&Conn{pool: pool, createdAt: now.Add(-50 * time.Minute)}, false},
-		"idle in time":   {&Conn{pool: pool, createdAt: now, idleSince: now.Add(-59 * time.Second)}, false},
-		"idle too long":  {&Conn{pool: pool, createdAt: now, idleSince: now.Add(-time.Minute)}, true},
-		"lifespan ended": {&Conn{pool: pool, createdAt: now.Add(-time.Hour)}, true},
+		"fresh":          {createdAt: now},
+		"checked out":    {createdAt: now.Add(-50 * time.Minute)},
+		"idle in time":   {createdAt: now, idleSince: now.Add(-59 * time.Second)},
+		"idle too long":  {createdAt: now, idleSince: now.Add(-time.Minute), expired: true},
+		"lifespan ended": {createdAt: now.Add(-time.Hour), expired: true},
 	}
 	for name, tt := range tests {
 		s.Run(name, func() {
-			s.Equal(tt.expired, tt.conn.expired(now))
+			conn := &Conn{pool: pool, createdAt: tt.createdAt, idleSince: tt.idleSince, lifespan: time.Hour}
+			s.Equal(tt.expired, conn.expired(now))
 		})
 	}
+}
+
+func (s *ConnSuite) TestLifespanJitter() {
+	pool := s.newPool(WithLifespanTimeout(time.Hour))
+
+	seen := map[time.Duration]bool{}
+	for range 100 {
+		lifespan := newConn(nil, pool).lifespan
+		s.Greater(lifespan, 54*time.Minute)
+		s.LessOrEqual(lifespan, time.Hour)
+		seen[lifespan] = true
+	}
+	s.Greater(len(seen), 1)
 }
 
 func (s *ConnSuite) TestCloseReturnsToPool() {
@@ -136,17 +151,22 @@ func (s *ConnSuite) TestCloseDiscardsUnreadData() {
 }
 
 func (s *ConnSuite) TestCloseDiscardsLifespanExpired() {
-	pool := s.newPool(WithLifespanTimeout(20 * time.Millisecond))
+	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(time.Hour))
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
-	s.eventually(func() bool { return conn.expired(time.Now()) })
+	conn.createdAt = time.Now().Add(-time.Hour)
 	s.Require().NoError(conn.Close())
 
 	s.Empty(pool.idleChan)
 	s.Empty(pool.slots)
 	_, err = conn.Conn.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
+
+	again, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	defer s.closeConn(again)
+	s.Equal(int32(2), s.attempts.Load())
 }
 
 func (s *ConnSuite) TestCloseAfterPoolClose() {

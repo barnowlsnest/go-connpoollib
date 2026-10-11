@@ -283,12 +283,14 @@ func (s *PoolSuite) TestAcquireWaiterUnblockedByPoolClose() {
 }
 
 func (s *PoolSuite) TestAcquireEvictsIdleTimedOutConn() {
-	pool := s.newPool(WithIdleTimeout(20 * time.Millisecond))
+	pool := s.newPool(WithIdleTimeout(time.Minute))
 
 	conn, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
 	s.Require().NoError(conn.Close())
-	time.Sleep(40 * time.Millisecond)
+	idle := <-pool.idleChan
+	idle.idleSince = time.Now().Add(-time.Minute)
+	pool.idleChan <- idle
 
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
@@ -308,7 +310,11 @@ func (s *PoolSuite) TestAcquireEvictsConnClosedByPeer() {
 	s.Require().NotNil(srv)
 	s.Require().NoError(conn.Close())
 	s.Require().NoError(srv.Close())
-	time.Sleep(20 * time.Millisecond)
+	s.eventually(func() bool {
+		idle := <-pool.idleChan
+		defer func() { pool.idleChan <- idle }()
+		return !idle.reusable()
+	})
 
 	again, err := pool.Acquire(context.Background())
 	s.Require().NoError(err)
@@ -334,20 +340,6 @@ func (s *PoolSuite) TestAcquireResetsIdleTime() {
 	s.Len(pool.idleChan, 1)
 }
 
-func (s *PoolSuite) TestDiscardFreesSlot() {
-	pool := s.newPool(WithMaxPoolSize(1), WithLifespanTimeout(20*time.Millisecond))
-
-	first, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	time.Sleep(40 * time.Millisecond)
-	s.Require().NoError(first.Close())
-
-	second, err := pool.Acquire(context.Background())
-	s.Require().NoError(err)
-	defer s.closeConn(second)
-	s.Equal(int32(2), s.attempts.Load())
-}
-
 func (s *PoolSuite) TestPoolCloseDuringDial() {
 	pool := s.newPool()
 	s.onAttempt = func(int32) { time.Sleep(50 * time.Millisecond) }
@@ -369,6 +361,26 @@ func (s *PoolSuite) TestPoolCloseClosesIdle() {
 	pool.idleChan <- idle
 
 	s.NoError(pool.Close())
+	_, err = idle.Read(make([]byte, 1))
+	s.ErrorIs(err, net.ErrClosed)
+	s.Empty(pool.slots)
+}
+
+func (s *PoolSuite) TestAcquireDuringPoolCloseDrain() {
+	pool := s.newPool()
+
+	conn, err := pool.Acquire(context.Background())
+	s.Require().NoError(err)
+	s.Require().NoError(conn.Close())
+	idle := <-pool.idleChan
+	pool.idleChan <- idle
+	// Close's state before it drains idleChan.
+	pool.closed.Store(true)
+	close(pool.closedChan)
+	close(pool.idleChan)
+
+	_, err = pool.Acquire(context.Background())
+	s.Require().ErrorIs(err, ErrPoolAlreadyClosed)
 	_, err = idle.Read(make([]byte, 1))
 	s.ErrorIs(err, net.ErrClosed)
 	s.Empty(pool.slots)

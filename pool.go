@@ -65,6 +65,14 @@ func (pool *ConnPool) Config() *Config {
 // AcquireTimeout, or until ctx is done, for a free slot. The caller must Close
 // the returned connection to return it to the pool.
 func (pool *ConnPool) Acquire(ctx context.Context) (*Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// An idle connection needs no timeout context.
+	if conn, err := pool.acquireIdle(); conn != nil || err != nil {
+		return conn, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, pool.cfg.AcquireTimeout())
 	defer cancel()
 
@@ -83,10 +91,8 @@ func (pool *ConnPool) acquireOnce(ctx context.Context) (*Conn, error) {
 	}
 
 	// Prefer an idle connection over dialing a new one.
-	select {
-	case idle, ok := <-pool.idleChan:
-		return pool.takeIdle(idle, ok)
-	default:
+	if conn, err := pool.acquireIdle(); conn != nil || err != nil {
+		return conn, err
 	}
 
 	select {
@@ -99,6 +105,23 @@ func (pool *ConnPool) acquireOnce(ctx context.Context) (*Conn, error) {
 	case pool.dialTokens <- struct{}{}:
 		defer func() { <-pool.dialTokens }()
 		return pool.dialIntoSlot(ctx)
+	}
+}
+
+// acquireIdle takes an idle connection without blocking, discarding unfit ones.
+// It returns nil, nil if none is ready.
+func (pool *ConnPool) acquireIdle() (*Conn, error) {
+	for {
+		select {
+		case idle, ok := <-pool.idleChan:
+			conn, err := pool.takeIdle(idle, ok)
+			if errors.Is(err, errConnDiscarded) {
+				continue
+			}
+			return conn, err
+		default:
+			return nil, nil
+		}
 	}
 }
 
@@ -122,9 +145,14 @@ func (pool *ConnPool) dialIntoSlot(ctx context.Context) (*Conn, error) {
 }
 
 // takeIdle handles a receive from idleChan. It returns ErrPoolAlreadyClosed if
-// the channel was closed, or errConnDiscarded if the connection was unfit.
+// the pool is closed, or errConnDiscarded if the connection was unfit.
 func (pool *ConnPool) takeIdle(conn *Conn, ok bool) (*Conn, error) {
 	if !ok {
+		return nil, ErrPoolAlreadyClosed
+	}
+	// A closed idleChan still yields buffered conns until Close drains it.
+	if pool.closed.Load() {
+		_ = pool.closeConn(conn)
 		return nil, ErrPoolAlreadyClosed
 	}
 	if conn.expired(time.Now()) || !conn.reusable() {
@@ -217,7 +245,13 @@ func (pool *ConnPool) openConnection(ctx context.Context) (*Conn, error) {
 // release returns the connection to the idle set. The connection is closed
 // instead if the pool is closed or already holds MaxPoolSize idle connections.
 func (pool *ConnPool) release(conn *Conn) error {
-	idle := &Conn{Conn: conn.Conn, pool: pool, createdAt: conn.createdAt, idleSince: time.Now()}
+	idle := &Conn{
+		Conn:      conn.Conn,
+		pool:      pool,
+		createdAt: conn.createdAt,
+		lifespan:  conn.lifespan,
+		idleSince: time.Now(),
+	}
 	if pool.putIdle(idle) {
 		return nil
 	}

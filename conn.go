@@ -2,12 +2,18 @@ package connpool
 
 import (
 	"errors"
+	"math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
 )
 
-const connCheckTimeout = time.Millisecond
+const (
+	connCheckTimeout = time.Millisecond
+	// lifespanJitterDiv shortens each connection's lifespan by up to 1/10, so
+	// connections opened together do not all expire together.
+	lifespanJitterDiv = 10
+)
 
 // Conn is a pooled connection. It wraps a net.Conn and returns it to the pool
 // on Close instead of closing it. A Conn must not be used after Close.
@@ -16,25 +22,30 @@ type Conn struct {
 	idleSince time.Time
 	net.Conn
 	pool     *ConnPool
+	lifespan time.Duration
 	released atomic.Bool
 }
 
 func newConn(conn net.Conn, pool *ConnPool) *Conn {
+	lifespan := pool.cfg.LifespanTimeout()
+	if jitter := lifespan / lifespanJitterDiv; jitter > 0 {
+		lifespan -= rand.N(jitter) //nolint:gosec // jitter, not security
+	}
 	return &Conn{
 		Conn:      conn,
 		pool:      pool,
 		createdAt: time.Now(),
+		lifespan:  lifespan,
 	}
 }
 
-// expired reports whether the connection outlived the configured lifespan, or
-// has been idle for longer than the configured idle timeout.
+// expired reports whether the connection outlived its lifespan, or has been
+// idle for longer than the configured idle timeout.
 func (c *Conn) expired(now time.Time) bool {
-	cfg := c.pool.cfg
-	if now.Sub(c.createdAt) >= cfg.LifespanTimeout() {
+	if now.Sub(c.createdAt) >= c.lifespan {
 		return true
 	}
-	return !c.idleSince.IsZero() && now.Sub(c.idleSince) >= cfg.IdleTimeout()
+	return !c.idleSince.IsZero() && now.Sub(c.idleSince) >= c.pool.cfg.IdleTimeout()
 }
 
 // Close returns the connection to the pool. A connection that is no longer
@@ -44,7 +55,8 @@ func (c *Conn) Close() error {
 	if c.released.Swap(true) {
 		return net.ErrClosed
 	}
-	if c.expired(time.Now()) || !c.reusable() {
+	// Skip the reusable probe when release would reject the conn anyway.
+	if c.pool.closed.Load() || c.expired(time.Now()) || !c.reusable() {
 		return c.pool.closeConn(c)
 	}
 
@@ -94,6 +106,15 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 // reusable reports whether the connection is idle and healthy: nothing is
 // waiting to be read and the peer has not closed it. Deadlines are cleared.
 func (c *Conn) reusable() bool {
+	// Clear deadlines first: an expired one would fail the probe.
+	if err := c.Conn.SetDeadline(time.Time{}); err != nil {
+		return false
+	}
+	if idle, ok := probeIdle(c.Conn); ok {
+		return idle
+	}
+
+	// Fallback: a short blocking read that must time out.
 	if err := c.Conn.SetReadDeadline(time.Now().Add(connCheckTimeout)); err != nil {
 		return false
 	}
