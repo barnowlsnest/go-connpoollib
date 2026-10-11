@@ -122,9 +122,14 @@ func (pool *ConnPool) dialIntoSlot(ctx context.Context) (*Conn, error) {
 }
 
 // takeIdle handles a receive from idleChan. It returns ErrPoolAlreadyClosed if
-// the channel was closed, or errConnDiscarded if the connection was unfit.
+// the pool is closed, or errConnDiscarded if the connection was unfit.
 func (pool *ConnPool) takeIdle(conn *Conn, ok bool) (*Conn, error) {
 	if !ok {
+		return nil, ErrPoolAlreadyClosed
+	}
+	// A closed idleChan still yields buffered conns until Close drains it.
+	if pool.closed.Load() {
+		_ = pool.closeConn(conn)
 		return nil, ErrPoolAlreadyClosed
 	}
 	if conn.expired(time.Now()) || !conn.reusable() {
