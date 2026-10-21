@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`connpool` is a single-package, dependency-free (testify only in tests) Go library: a bounded pool of reusable `net.Conn`. Module `github.com/dshlychkou/connpool`, `go 1.27` (deliberate; don't lower it). Pre-1.0, no tagged release.
+`connpool` is a single-package, dependency-free (testify only in tests) Go library: a bounded pool of reusable `net.Conn`. Module `github.com/brnowlsnest/go-connpoollib/v2` (the package lives in `pkg/connpool`, import path `github.com/brnowlsnest/go-connpoollib/v2/pkg/connpool`), `go 1.27` (deliberate; don't lower it). Pre-1.0, no tagged release.
 
 ## Commands
 
@@ -22,7 +22,7 @@ Tests always run with `-race`. CI (`.github/workflows/`) runs build, test and a 
 
 ## Architecture
 
-The pool (`pool.go`) is built entirely on channels, plus one mutex:
+All source files below live in `pkg/connpool/`. The pool (`pool.go`) is built entirely on channels, plus one mutex:
 
 - `idleChan` (buffered, cap `MaxPoolSize`): idle `*Conn`s, reused oldest-first.
 - `slots` (semaphore, cap `MaxPoolSize`): one token per open connection. Every open connection holds a slot; `dropConn` is the only place that frees it (and decrements `stats.open`).

@@ -1,4 +1,4 @@
-module github.com/dshlychkou/connpool
+module github.com/brnowlsnest/go-connpoollib/v2
 
 go 1.27
 

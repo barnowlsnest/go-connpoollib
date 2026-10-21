@@ -1,8 +1,8 @@
 # go-connpoollib
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/dshlychkou/connpool.svg)](https://pkg.go.dev/github.com/dshlychkou/connpool)
-[![Build and Test](https://github.com/dshlychkou/connpool/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/dshlychkou/connpool/actions/workflows/build.yml)
-[![Lint](https://github.com/dshlychkou/connpool/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/dshlychkou/connpool/actions/workflows/lint.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/brnowlsnest/go-connpoollib/v2.svg)](https://pkg.go.dev/github.com/brnowlsnest/go-connpoollib/v2/pkg/connpool)
+[![Build and Test](https://github.com/brnowlsnest/go-connpoollib/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/brnowlsnest/go-connpoollib/actions/workflows/build.yml)
+[![Lint](https://github.com/brnowlsnest/go-connpoollib/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/brnowlsnest/go-connpoollib/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A small, dependency-free Go pool of reusable `net.Conn` connections for
@@ -29,7 +29,7 @@ TCP, TLS, Unix sockets, or anything you can dial.
 ## Install
 
 ```sh
-go get github.com/dshlychkou/connpool
+go get github.com/brnowlsnest/go-connpoollib/v2/pkg/connpool
 ```
 
 Requires Go 1.27 or newer.
@@ -45,7 +45,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dshlychkou/connpool"
+	"github.com/brnowlsnest/go-connpoollib/v2/pkg/connpool"
 )
 
 func main() {
