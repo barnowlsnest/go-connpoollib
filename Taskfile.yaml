@@ -6,7 +6,7 @@ vars:
   ALL: ./...
 
 env:
-  MODULE_PATH: github.com/brnowlsnest/go-connpoollib/v2
+  MODULE_PATH: github.com/barnowlsnest/go-connpoollib/v2
 
 tasks:
   go-update:

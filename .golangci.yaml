@@ -108,7 +108,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/brnowlsnest/go-connpoollib/v2
+        - github.com/barnowlsnest/go-connpoollib/v2
   exclusions:
     generated: lax
     paths:

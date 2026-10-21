@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`connpool` is a single-package, dependency-free (testify only in tests) Go library: a bounded pool of reusable `net.Conn`. Module `github.com/brnowlsnest/go-connpoollib/v2` (the package lives in `pkg/connpool`, import path `github.com/brnowlsnest/go-connpoollib/v2/pkg/connpool`), `go 1.27` (deliberate; don't lower it). Pre-1.0, no tagged release.
+`connpool` is a single-package, dependency-free (testify only in tests) Go library: a bounded pool of reusable `net.Conn`. Module `github.com/barnowlsnest/go-connpoollib/v2` (the package lives in `pkg/connpool`, import path `github.com/barnowlsnest/go-connpoollib/v2/pkg/connpool`), `go 1.27` (deliberate; don't lower it). Pre-1.0, no tagged release.
 
 ## Commands
 
