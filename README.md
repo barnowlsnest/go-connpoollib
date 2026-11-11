@@ -219,6 +219,8 @@ the config in use.
 
 ## How it works
 
+![Animated diagram of a connection's life in the pool: idle reuse, release, discard, dial, keep warm](assets/how-it-works.svg)
+
 The pool is built on channels: a buffered channel holds the idle
 connections, one semaphore channel caps open connections (slots), and
 another caps concurrent dials (dial tokens). `Acquire` takes a ready idle
