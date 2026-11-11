@@ -26,6 +26,41 @@ TCP, TLS, Unix sockets, or anything you can dial.
 - **Drop-in `net.Conn`.** `*connpool.Conn` implements `net.Conn`, and
   `Close` returns it to the pool.
 
+## How it works
+
+![Animated diagram of a connection's life in the pool: idle reuse, release, discard, dial, keep warm](assets/how-it-works.svg)
+
+The pool is built on channels: a buffered channel holds the idle
+connections, one semaphore channel caps open connections (slots), and
+another caps concurrent dials (dial tokens). `Acquire` takes a ready idle
+connection without blocking if one is available. Otherwise it waits for
+whichever comes first: an idle connection, or a dial token and then a free
+slot to dial into.
+
+Before a connection is handed out, and again when it is returned, the pool
+checks it:
+
+1. **Expiry:** has it outlived its lifespan or `IdleTimeout`?
+2. **Health:** on Unix, a non-blocking `recv(MSG_PEEK)` on the socket.
+   No data means healthy, EOF means the peer closed it, and pending bytes
+   mean the connection is out of sync. For wrapped connections such as
+   `*tls.Conn`, pending bytes may just be protocol records (like TLS 1.3
+   session tickets), so the pool falls back to a 1 ms read through the
+   wrapper.
+
+On platforms without the socket peek (Windows, for example), and for
+connections without a file descriptor (`net.Pipe`), the health check is
+always the 1 ms read, which adds about 1 ms to each `Acquire` and `Close`.
+
+When `MinIdle` is positive, a background worker tops up the idle set
+whenever a connection is taken or closed, and every
+`min(IdleTimeout, LifespanTimeout) / 2` (15 s by default) it also evicts
+expired idle connections.
+
+`Close` stops the background worker, closes the idle connections and makes
+further `Acquire` calls fail. Connections still checked out are closed
+when their holders release them.
+
 ## Install
 
 ```sh
@@ -216,39 +251,6 @@ case errors.Is(err, context.DeadlineExceeded):
 `WithDialer` and `WithDialFunc` set the same dialer, so the last one passed
 wins. Every setting has a getter on `*Config`, and `pool.Config()` returns
 the config in use.
-
-## How it works
-
-The pool is built on channels: a buffered channel holds the idle
-connections, one semaphore channel caps open connections (slots), and
-another caps concurrent dials (dial tokens). `Acquire` takes a ready idle
-connection without blocking if one is available. Otherwise it waits for
-whichever comes first: an idle connection, or a dial token and then a free
-slot to dial into.
-
-Before a connection is handed out, and again when it is returned, the pool
-checks it:
-
-1. **Expiry:** has it outlived its lifespan or `IdleTimeout`?
-2. **Health:** on Unix, a non-blocking `recv(MSG_PEEK)` on the socket.
-   No data means healthy, EOF means the peer closed it, and pending bytes
-   mean the connection is out of sync. For wrapped connections such as
-   `*tls.Conn`, pending bytes may just be protocol records (like TLS 1.3
-   session tickets), so the pool falls back to a 1 ms read through the
-   wrapper.
-
-On platforms without the socket peek (Windows, for example), and for
-connections without a file descriptor (`net.Pipe`), the health check is
-always the 1 ms read, which adds about 1 ms to each `Acquire` and `Close`.
-
-When `MinIdle` is positive, a background worker tops up the idle set
-whenever a connection is taken or closed, and every
-`min(IdleTimeout, LifespanTimeout) / 2` (15 s by default) it also evicts
-expired idle connections.
-
-`Close` stops the background worker, closes the idle connections and makes
-further `Acquire` calls fail. Connections still checked out are closed
-when their holders release them.
 
 ## Limitations and known issues
 
